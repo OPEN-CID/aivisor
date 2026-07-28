@@ -102,6 +102,10 @@ pub(crate) fn path_cstring(p: &Path) -> Result<CString, Error> {
 mod tests {
     use super::*;
 
+    // Rootfs::prepare creates its sandbox dir under the real /run/aivisor,
+    // which requires root — same reason manager.rs's create/destroy tests
+    // are gated the same way.
+    #[cfg(feature = "privileged-tests")]
     #[test]
     fn test_rootfs_prepare_paths() {
         let tmp = std::env::temp_dir().join(format!("aivisor-rootfs-test-{}", std::process::id()));
