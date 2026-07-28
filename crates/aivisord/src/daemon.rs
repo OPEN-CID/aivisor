@@ -38,9 +38,7 @@ impl Daemon {
 
     /// Run the gRPC server.
     pub async fn run(&self, socket_path: &str) -> Result<(), Error> {
-        let _ = Path::new(socket_path)
-            .parent()
-            .map(|p| std::fs::create_dir_all(p));
+        let _ = Path::new(socket_path).parent().map(std::fs::create_dir_all);
 
         let _refill_handle = self.warm_pool.spawn_refill_task(WARM_POOL_REFILL_INTERVAL);
 
