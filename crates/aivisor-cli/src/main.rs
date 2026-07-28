@@ -223,7 +223,7 @@ fn cmd_run(
     }
 
     if let Some(ref mem_str) = memory {
-        limits.memory_max = Some(parse_size(mem_str)?);
+        limits.memory_max = Some(parse_size(mem_str).map_err(|e| anyhow::anyhow!(e))?);
         limits.memory_high = Some(limits.memory_max.unwrap() * 9 / 10);
     }
 

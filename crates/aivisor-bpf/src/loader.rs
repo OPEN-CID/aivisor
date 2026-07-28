@@ -2,7 +2,7 @@ use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 
 use aivisor_core::Error;
-use libbpf_rs::{Link, Object, ObjectBuilder, ProgramType};
+use libbpf_rs::{Link, MapCore, Object, ObjectBuilder, ProgramType};
 
 const PIN_DIR: &str = "/sys/fs/bpf/aivisor";
 

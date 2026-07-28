@@ -25,6 +25,7 @@ pub struct SandboxHandle {
     pub rootfs: Option<Rootfs>,
 }
 
+#[derive(serde::Serialize)]
 pub struct SandboxSummary {
     pub id: SandboxId,
     pub state: SandboxState,

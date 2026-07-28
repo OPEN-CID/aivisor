@@ -63,11 +63,12 @@ impl BpfManager {
     /// range can never contain a matching rule index.
     pub fn register_sandbox(&self, cgid: CgroupId) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
+        let policy_gen = inner.policy_gen;
         inner.registered.insert(
             cgid.as_raw(),
             SandboxBpfState {
                 cgid,
-                policy_gen: inner.policy_gen,
+                policy_gen,
                 fs_rules_base: 0,
                 fs_rules_count: 0,
                 exec_rules_base: 0,
