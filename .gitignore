@@ -12,3 +12,6 @@ sdk/typescript/node_modules/
 k8s/controller/bin/
 bench/**/output/
 images/base/output/
+# kernel-specific BPF CO-RE header, generated per-runner by CI or manually via bpftool
+# (build.rs gracefully degrades without it — see its header comment)
+crates/aivisor-bpf/src/bpf/vmlinux.h
