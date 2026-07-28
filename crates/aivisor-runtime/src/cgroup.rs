@@ -219,9 +219,8 @@ fn delegate_controllers(cgroup_root: &Path) -> Result<(), Error> {
     // delegate any of them must fail closed rather than silently produce
     // an unconfined sandbox.
     for ctrl in ["+cpu", "+memory", "+pids"] {
-        fs::write(&subtree_path, ctrl).map_err(|e| {
-            Error::CgroupSetup(format!("delegate controller {ctrl}: {e}"))
-        })?;
+        fs::write(&subtree_path, ctrl)
+            .map_err(|e| Error::CgroupSetup(format!("delegate controller {ctrl}: {e}")))?;
     }
     let _ = fs::write(&subtree_path, "+io");
     Ok(())

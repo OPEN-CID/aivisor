@@ -68,7 +68,10 @@ mod hostile_tests {
             .arg(&bin_path)
             .status()
             .expect("invoke rustc to build the in-sandbox check program");
-        assert!(status.success(), "rustc failed to compile the check program");
+        assert!(
+            status.success(),
+            "rustc failed to compile the check program"
+        );
 
         manager
             .exec(id, "/workspace/check", &[])
@@ -95,7 +98,10 @@ mod hostile_tests {
         );
 
         let _ = manager.destroy(&id);
-        assert_eq!(code, 0, "expected /etc/shadow read to be denied (EPERM/EACCES)");
+        assert_eq!(
+            code, 0,
+            "expected /etc/shadow read to be denied (EPERM/EACCES)"
+        );
     }
 
     #[test]
@@ -130,7 +136,10 @@ mod hostile_tests {
         );
 
         let _ = manager.destroy(&id);
-        assert_eq!(code, 0, "expected mount() inside the sandbox to be denied (EPERM/EACCES)");
+        assert_eq!(
+            code, 0,
+            "expected mount() inside the sandbox to be denied (EPERM/EACCES)"
+        );
     }
 
     #[test]

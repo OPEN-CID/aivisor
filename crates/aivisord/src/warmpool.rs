@@ -83,9 +83,7 @@ impl WarmPool {
                 id: SandboxId::new(),
                 template: self.template.clone(),
                 limits: aivisor_core::ResourceLimits::default(),
-                workspace: aivisor_core::WorkspaceSpec::Tmpfs {
-                    size: 268_435_456,
-                },
+                workspace: aivisor_core::WorkspaceSpec::Tmpfs { size: 268_435_456 },
                 env: Default::default(),
                 timeout: Some(Duration::from_secs(1800)),
                 policy: None,
@@ -114,7 +112,9 @@ impl WarmPool {
         let now = Instant::now();
         let max_age = inner.max_age;
         let before = inner.entries.len();
-        inner.entries.retain(|e| now.duration_since(e.created) < max_age);
+        inner
+            .entries
+            .retain(|e| now.duration_since(e.created) < max_age);
         let expired = before - inner.entries.len();
         if expired > 0 {
             tracing::warn!(expired, "warm pool: dropped entries older than max_age");

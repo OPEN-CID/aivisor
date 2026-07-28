@@ -72,15 +72,29 @@ fn install_filter(filter: &[libc::sock_filter]) -> Result<(), Error> {
 }
 
 fn bpf_stmt(code: u16, k: u32) -> libc::sock_filter {
-    libc::sock_filter { code: code as u8, jt: 0, jf: 0, k }
+    libc::sock_filter {
+        code: code as u8,
+        jt: 0,
+        jf: 0,
+        k,
+    }
 }
 
 fn bpf_jump(code: u16, jt: u8, jf: u8, k: u32) -> libc::sock_filter {
-    libc::sock_filter { code: code as u8, jt, jf, k }
+    libc::sock_filter {
+        code: code as u8,
+        jt,
+        jf,
+        k,
+    }
 }
 
-fn arch_offset() -> u32 { 4 }
-fn nr_offset() -> u32 { 0 }
+fn arch_offset() -> u32 {
+    4
+}
+fn nr_offset() -> u32 {
+    0
+}
 
 const AUDIT_ARCH_X86_64: u32 = 0xc000003e;
 const AUDIT_ARCH_AARCH64: u32 = 0xc00000b7;
@@ -123,8 +137,8 @@ compile_error!("aivisor-runtime seccomp profiles are only defined for x86_64 and
 /// Default-allow with a curated denylist.
 fn build_default_bpf() -> Vec<libc::sock_filter> {
     use libc::{
-        BPF_ABS, BPF_JEQ, BPF_JMP, BPF_LD, BPF_RET,
-        SECCOMP_RET_ALLOW, SECCOMP_RET_ERRNO, SECCOMP_RET_KILL_PROCESS,
+        BPF_ABS, BPF_JEQ, BPF_JMP, BPF_LD, BPF_RET, SECCOMP_RET_ALLOW, SECCOMP_RET_ERRNO,
+        SECCOMP_RET_KILL_PROCESS,
     };
 
     let mut insns = build_arch_check(native_audit_arch());
@@ -142,8 +156,14 @@ fn build_default_bpf() -> Vec<libc::sock_filter> {
         (libc::SYS_ptrace, SECCOMP_RET_ERRNO | 1),
         (libc::SYS_process_vm_readv, SECCOMP_RET_ERRNO | 1),
         (libc::SYS_process_vm_writev, SECCOMP_RET_ERRNO | 1),
-        (libc::SYS_userfaultfd, SECCOMP_RET_ERRNO | libc::ENOSYS as u32),
-        (libc::SYS_memfd_secret, SECCOMP_RET_ERRNO | libc::ENOSYS as u32),
+        (
+            libc::SYS_userfaultfd,
+            SECCOMP_RET_ERRNO | libc::ENOSYS as u32,
+        ),
+        (
+            libc::SYS_memfd_secret,
+            SECCOMP_RET_ERRNO | libc::ENOSYS as u32,
+        ),
         (libc::SYS_setns, SECCOMP_RET_ERRNO | 1),
         (libc::SYS_mount_setattr, SECCOMP_RET_ERRNO | 1),
         (libc::SYS_open_by_handle_at, SECCOMP_RET_ERRNO | 1),
@@ -154,7 +174,10 @@ fn build_default_bpf() -> Vec<libc::sock_filter> {
         (libc::SYS_reboot, SECCOMP_RET_KILL_PROCESS),
         (libc::SYS_iopl, SECCOMP_RET_KILL_PROCESS),
         (libc::SYS_ioperm, SECCOMP_RET_KILL_PROCESS),
-        (libc::SYS_io_uring_setup, SECCOMP_RET_ERRNO | libc::ENOSYS as u32),
+        (
+            libc::SYS_io_uring_setup,
+            SECCOMP_RET_ERRNO | libc::ENOSYS as u32,
+        ),
         (libc::SYS_clock_settime, SECCOMP_RET_ERRNO | 1),
         (libc::SYS_settimeofday, SECCOMP_RET_ERRNO | 1),
         (libc::SYS_adjtimex, SECCOMP_RET_ERRNO | 1),
@@ -174,7 +197,10 @@ fn build_default_bpf() -> Vec<libc::sock_filter> {
         (libc::SYS_seccomp, SECCOMP_RET_ERRNO | 1),
         (libc::SYS_acct, SECCOMP_RET_KILL_PROCESS),
         (libc::SYS_quotactl, SECCOMP_RET_ERRNO | 1),
-        (libc::SYS_nfsservctl, SECCOMP_RET_ERRNO | libc::ENOSYS as u32),
+        (
+            libc::SYS_nfsservctl,
+            SECCOMP_RET_ERRNO | libc::ENOSYS as u32,
+        ),
     ];
 
     for (nr, action) in denied {
@@ -188,8 +214,7 @@ fn build_default_bpf() -> Vec<libc::sock_filter> {
 
 fn build_strict_bpf() -> Vec<libc::sock_filter> {
     use libc::{
-        BPF_ABS, BPF_JEQ, BPF_JMP, BPF_LD, BPF_RET,
-        SECCOMP_RET_ALLOW, SECCOMP_RET_KILL_PROCESS,
+        BPF_ABS, BPF_JEQ, BPF_JMP, BPF_LD, BPF_RET, SECCOMP_RET_ALLOW, SECCOMP_RET_KILL_PROCESS,
     };
 
     let mut insns = build_arch_check(native_audit_arch());

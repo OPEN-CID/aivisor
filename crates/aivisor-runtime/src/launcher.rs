@@ -131,8 +131,8 @@ impl Launcher {
         cmd: &str,
         args: &[String],
     ) -> Result<Supervisor, Error> {
-        let (parent_end, child_end) = UnixStream::pair()
-            .map_err(|e| Error::LaunchFailed(format!("sync socketpair: {e}")))?;
+        let (parent_end, child_end) =
+            UnixStream::pair().map_err(|e| Error::LaunchFailed(format!("sync socketpair: {e}")))?;
 
         // Reserve a fresh uid/gid range for this sandbox's user namespace.
         let uid_base = self
@@ -185,7 +185,11 @@ impl Launcher {
                 &mut child_end,
                 rootfs,
                 &rootfs_merged,
-                &spec.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>(),
+                &spec
+                    .env
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<Vec<_>>(),
                 cmd,
                 args,
                 policy,
@@ -337,9 +341,7 @@ impl Launcher {
 
         let mut envp_c: Vec<CString> = Vec::with_capacity(env.len());
         for (k, v) in env {
-            envp_c.push(
-                CString::new(format!("{k}={v}")).map_err(|e| format!("CString env: {e}"))?,
-            );
+            envp_c.push(CString::new(format!("{k}={v}")).map_err(|e| format!("CString env: {e}"))?);
         }
         let mut envp: Vec<*const libc::c_char> = envp_c.iter().map(|c| c.as_ptr()).collect();
         envp.push(std::ptr::null());
@@ -390,13 +392,8 @@ impl Launcher {
         }
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         let pid_str = pid.as_raw().to_string();
-        let ret = unsafe {
-            libc::write(
-                fd.as_raw_fd(),
-                pid_str.as_ptr() as *const _,
-                pid_str.len(),
-            )
-        };
+        let ret =
+            unsafe { libc::write(fd.as_raw_fd(), pid_str.as_ptr() as *const _, pid_str.len()) };
         if ret < 0 {
             return Err(Error::CgroupSetup(format!(
                 "write cgroup.procs: {}",
@@ -420,8 +417,8 @@ fn kill_via_pidfd(pidfd: RawFd) {
 }
 
 fn send_msg(sock: &mut UnixStream, msg: &ChildMsg) -> std::io::Result<()> {
-    let bytes = serde_json::to_vec(msg)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let bytes =
+        serde_json::to_vec(msg).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     let len = (bytes.len() as u32).to_le_bytes();
     sock.write_all(&len)?;
     sock.write_all(&bytes)
@@ -540,8 +537,7 @@ fn mount_sys(merged: &std::path::Path) -> Result<(), String> {
             fstype.as_ptr(),
             target.as_ptr(),
             fstype.as_ptr(),
-            (libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC)
-                as libc::c_ulong,
+            (libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC) as libc::c_ulong,
             std::ptr::null(),
         )
     };
@@ -590,7 +586,10 @@ fn mount_dev(merged: &std::path::Path) -> Result<(), String> {
         )
     };
     if ret != 0 {
-        return Err(format!("mount dev (tmpfs): {}", std::io::Error::last_os_error()));
+        return Err(format!(
+            "mount dev (tmpfs): {}",
+            std::io::Error::last_os_error()
+        ));
     }
 
     // Minimal device node subset (blueprint §7): null, zero, full, random,
@@ -619,7 +618,10 @@ fn mount_dev(merged: &std::path::Path) -> Result<(), String> {
         )
     };
     if ret != 0 {
-        return Err(format!("mount dev/pts: {}", std::io::Error::last_os_error()));
+        return Err(format!(
+            "mount dev/pts: {}",
+            std::io::Error::last_os_error()
+        ));
     }
 
     let ptmx_path = dev_path.join("ptmx");
@@ -636,7 +638,10 @@ fn mount_dev(merged: &std::path::Path) -> Result<(), String> {
         )
     };
     if ret != 0 {
-        return Err(format!("bind dev/ptmx: {}", std::io::Error::last_os_error()));
+        return Err(format!(
+            "bind dev/ptmx: {}",
+            std::io::Error::last_os_error()
+        ));
     }
 
     Ok(())
@@ -647,8 +652,8 @@ fn bind_host_dev(name: &str, dest: &std::path::Path) -> Result<(), String> {
     // mount namespace (before pivot_root). Doing this bind after pivoting
     // would resolve "/dev/<name>" against the sandbox's own empty
     // placeholder instead of the real device.
-    let src = path_cstring(std::path::Path::new(&format!("/dev/{name}")))
-        .map_err(|e| e.to_string())?;
+    let src =
+        path_cstring(std::path::Path::new(&format!("/dev/{name}"))).map_err(|e| e.to_string())?;
     let dst = path_cstring(dest).map_err(|e| e.to_string())?;
     let ret = unsafe {
         abi::mount(

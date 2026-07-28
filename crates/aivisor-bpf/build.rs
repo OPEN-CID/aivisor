@@ -42,7 +42,10 @@ fn main() {
             bpf_src_dir.join(format!("{name}.bpf.c")).display()
         );
     }
-    println!("cargo:rerun-if-changed={}", bpf_src_dir.join("common.h").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        bpf_src_dir.join("common.h").display()
+    );
     println!("cargo:rerun-if-changed={}", vmlinux_h.display());
 
     let clang = match find_clang() {

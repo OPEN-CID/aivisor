@@ -221,8 +221,14 @@ mod tests {
 
         let plan_a = BpfPlan {
             fs_rules: vec![
-                aivisor_policy::BpfFsRule { path_hash: 1, access_mask: 1 },
-                aivisor_policy::BpfFsRule { path_hash: 2, access_mask: 1 },
+                aivisor_policy::BpfFsRule {
+                    path_hash: 1,
+                    access_mask: 1,
+                },
+                aivisor_policy::BpfFsRule {
+                    path_hash: 2,
+                    access_mask: 1,
+                },
             ],
             exec_rules: vec![],
             net_rules: vec![],
@@ -230,7 +236,10 @@ mod tests {
             block_metadata: true,
         };
         let plan_b = BpfPlan {
-            fs_rules: vec![aivisor_policy::BpfFsRule { path_hash: 3, access_mask: 1 }],
+            fs_rules: vec![aivisor_policy::BpfFsRule {
+                path_hash: 3,
+                access_mask: 1,
+            }],
             exec_rules: vec![],
             net_rules: vec![],
             exec_policy_present: false,

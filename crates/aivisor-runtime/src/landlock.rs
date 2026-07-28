@@ -11,11 +11,7 @@ use crate::abi;
 /// the minimum ABI requirement is not met.
 pub fn probe_landlock_abi(min_abi: u32) -> Result<u32, Error> {
     let ret = unsafe {
-        abi::landlock_create_ruleset(
-            std::ptr::null(),
-            0,
-            abi::LANDLOCK_CREATE_RULESET_VERSION,
-        )
+        abi::landlock_create_ruleset(std::ptr::null(), 0, abi::LANDLOCK_CREATE_RULESET_VERSION)
     };
 
     if ret < 0 {

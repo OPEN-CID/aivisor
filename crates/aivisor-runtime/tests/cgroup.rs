@@ -4,7 +4,7 @@
 #[cfg(feature = "privileged-tests")]
 #[test]
 fn test_cgroup_create_destroy() {
-    use aivisor_core::{SandboxId, ResourceLimits};
+    use aivisor_core::{ResourceLimits, SandboxId};
     use aivisor_runtime::cgroup::Cgroup;
     use std::path::Path;
 

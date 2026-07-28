@@ -470,10 +470,19 @@ mod tests {
     #[test]
     fn test_default_policy_is_deny_by_default_everywhere() {
         let policy = default_policy();
-        assert_eq!(policy.filesystem.as_ref().unwrap().default, AccessDefault::Deny);
-        assert_eq!(policy.network.as_ref().unwrap().default, AccessDefault::Deny);
+        assert_eq!(
+            policy.filesystem.as_ref().unwrap().default,
+            AccessDefault::Deny
+        );
+        assert_eq!(
+            policy.network.as_ref().unwrap().default,
+            AccessDefault::Deny
+        );
         assert!(policy.network.as_ref().unwrap().block_metadata);
-        assert!(policy.exec.is_none(), "exec left None so the dynamic per-call rule applies");
+        assert!(
+            policy.exec.is_none(),
+            "exec left None so the dynamic per-call rule applies"
+        );
     }
 
     #[cfg(feature = "privileged-tests")]

@@ -1,5 +1,5 @@
-use anyhow::Result;
 use aivisord::daemon;
+use anyhow::Result;
 use clap::Parser;
 
 #[derive(Parser)]

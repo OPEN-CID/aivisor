@@ -34,7 +34,10 @@ fn test_1000_cycles_no_leak() {
     }
 
     let list = manager.list();
-    assert!(list.is_empty(), "Expected zero sandboxes after all destroys");
+    assert!(
+        list.is_empty(),
+        "Expected zero sandboxes after all destroys"
+    );
 }
 
 #[cfg(not(feature = "privileged-tests"))]
