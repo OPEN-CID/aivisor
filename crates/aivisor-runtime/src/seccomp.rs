@@ -71,18 +71,18 @@ fn install_filter(filter: &[libc::sock_filter]) -> Result<(), Error> {
     Ok(())
 }
 
-fn bpf_stmt(code: u16, k: u32) -> libc::sock_filter {
+fn bpf_stmt(code: u32, k: u32) -> libc::sock_filter {
     libc::sock_filter {
-        code: code as u8,
+        code: code as u16,
         jt: 0,
         jf: 0,
         k,
     }
 }
 
-fn bpf_jump(code: u16, jt: u8, jf: u8, k: u32) -> libc::sock_filter {
+fn bpf_jump(code: u32, jt: u8, jf: u8, k: u32) -> libc::sock_filter {
     libc::sock_filter {
-        code: code as u8,
+        code: code as u16,
         jt,
         jf,
         k,
@@ -269,7 +269,7 @@ fn build_strict_bpf() -> Vec<libc::sock_filter> {
         libc::SYS_rseq,
     ];
 
-    for nr in &allow {
+    for nr in allow {
         insns.push(bpf_jump(BPF_JMP | BPF_JEQ, 0, 1, *nr as u32));
         insns.push(bpf_stmt(BPF_RET | 0x04, SECCOMP_RET_ALLOW));
     }
@@ -305,7 +305,7 @@ mod tests {
         let insns = build_arch_check(AUDIT_ARCH_X86_64);
         assert_eq!(insns.len(), 3);
         let load = &insns[0];
-        assert_eq!(load.code, (libc::BPF_LD | libc::BPF_ABS | 0x20) as u8);
+        assert_eq!(load.code, (libc::BPF_LD | libc::BPF_ABS | 0x20) as u16);
         let jump = &insns[1];
         // on mismatch (jf branch) it must land exactly on the KILL stmt
         // that follows, i.e. jf == 1, not 2 (which would skip over it).

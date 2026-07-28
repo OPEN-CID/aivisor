@@ -1,12 +1,11 @@
 use std::fs;
 use std::io;
 use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::io::{AsRawFd, OwnedFd};
+use std::os::unix::io::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use aivisor_core::{CgroupId, Error, ResourceLimits, SandboxId};
-use rustix::fs::{Mode, OFlags, Stat};
 
 pub struct Cgroup {
     pub path: PathBuf,

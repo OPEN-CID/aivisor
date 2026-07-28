@@ -81,7 +81,7 @@ fn probe_clone3() -> bool {
 
 fn probe_clone_into_cgroup() -> bool {
     let ver = probe_kernel_version();
-    (ver.0 > 5 || (ver.0 == 5 && ver.1 >= 7))
+    ver.0 > 5 || (ver.0 == 5 && ver.1 >= 7)
 }
 
 fn probe_cgroup_kill() -> bool {
@@ -104,7 +104,7 @@ fn probe_overlayfs() -> bool {
 
 fn probe_overlayfs_in_userns() -> bool {
     let ver = probe_kernel_version();
-    (ver.0 > 5 || (ver.0 == 5 && ver.1 >= 11))
+    ver.0 > 5 || (ver.0 == 5 && ver.1 >= 11)
 }
 
 fn probe_unprivileged_userns() -> bool {
