@@ -1,0 +1,51 @@
+[package]
+name = "aivisor-escape-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Linux-only, like aivisor-runtime — see the workspace root Cargo.toml's
+# build-on-Windows note. Scenario binaries below run *inside* a sandbox
+# and probe host-only APIs (mount, Landlock-restricted paths); the harness
+# links aivisor-runtime directly to actually construct one.
+#
+# Known assumption: scenario binaries are built as normal dynamically-
+# linked executables and staged into the sandbox's workspace to run there —
+# this assumes the base image's rootfs (`images/base/`) has a compatible
+# glibc. If that base image is musl-based or otherwise incompatible, add
+# `-C target-feature=+crt-static` to a `[[bin]]`-scoped rustflags override
+# (crates/aivisor-runtime/tests/hostile.rs's compile_and_run_in_sandbox
+# does exactly this for its own inline check programs, which don't share
+# this crate's build settings).
+[dependencies]
+aivisor-core = { path = "../../crates/aivisor-core" }
+aivisor-runtime = { path = "../../crates/aivisor-runtime" }
+aivisor-policy = { path = "../../crates/aivisor-policy" }
+libc = "0.2"
+
+[features]
+privileged-tests = ["aivisor-runtime/privileged-tests"]
+
+# Each scenario is its own tiny binary — the harness execve()s the
+# compiled binary *inside* a real sandbox and reads its stdout, so a
+# scenario must be a real process, not a #[test] function running in the
+# harness's own (unconfined) process.
+[[bin]]
+name = "aivisor-escape-fs-read-shadow"
+path = "fs/01_read_shadow.rs"
+
+[[bin]]
+name = "aivisor-escape-exec-denied"
+path = "exec/01_exec_denied.rs"
+
+[[bin]]
+name = "aivisor-escape-net-connect-denied"
+path = "net/01_connect_denied.rs"
+
+[[bin]]
+name = "aivisor-escape-priv-mount-inside"
+path = "priv/01_mount_inside.rs"
+
+[[bin]]
+name = "escape-harness"
+path = "harness.rs"

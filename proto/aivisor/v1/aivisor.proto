@@ -1,0 +1,167 @@
+syntax = "proto3";
+
+package aivisor.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+service SandboxService {
+  rpc CreateSandbox(CreateSandboxRequest) returns (Sandbox);
+  rpc GetSandbox(GetSandboxRequest) returns (Sandbox);
+  rpc ListSandboxes(ListSandboxesRequest) returns (ListSandboxesResponse);
+  rpc Exec(stream ExecRequest) returns (stream ExecResponse);
+  rpc BeginTurn(TurnRequest) returns (TurnResponse);
+  rpc EndTurn(TurnRequest) returns (TurnResponse);
+  rpc GrantCapability(GrantCapabilityRequest) returns (Sandbox);
+  rpc RevokeCapability(RevokeCapabilityRequest) returns (Sandbox);
+  rpc Pause(SandboxRef) returns (Sandbox);
+  rpc Resume(SandboxRef) returns (Sandbox);
+  rpc Snapshot(SnapshotRequest) returns (SnapshotInfo);
+  rpc Restore(RestoreRequest) returns (Sandbox);
+  rpc DestroySandbox(SandboxRef) returns (google.protobuf.Empty);
+  rpc StreamEvents(StreamEventsRequest) returns (stream Event);
+}
+
+message CreateSandboxRequest {
+  string template = 1;
+  SandboxPolicy policy_override = 2;
+  map<string, string> env = 3;
+  string idempotency_key = 4;
+  google.protobuf.Duration timeout = 5;
+}
+
+message Sandbox {
+  string id = 1;
+  string template = 2;
+  SandboxState state = 3;
+  SandboxPolicy effective_policy = 4;
+  SandboxStats stats = 5;
+  google.protobuf.Timestamp created_at = 6;
+  uint64 cgroup_id = 7;
+  string confinement_report = 8;
+}
+
+message SandboxRef {
+  string id = 1;
+}
+
+message GetSandboxRequest {
+  string id = 1;
+}
+
+message ListSandboxesRequest {}
+
+message ListSandboxesResponse {
+  repeated Sandbox sandboxes = 1;
+}
+
+message ExecRequest {
+  string sandbox_id = 1;
+  repeated string argv = 2;
+  bytes stdin = 3;
+  bool tty = 4;
+  map<string, string> env = 5;
+}
+
+message ExecResponse {
+  bytes stdout = 1;
+  bytes stderr = 2;
+  int32 exit_code = 3;
+}
+
+message TurnRequest {
+  string sandbox_id = 1;
+  string turn_id = 2;
+}
+
+message TurnResponse {
+  bool dirty = 1;
+}
+
+message GrantCapabilityRequest {
+  string sandbox_id = 1;
+  string capability = 2;
+  map<string, string> params = 3;
+}
+
+message RevokeCapabilityRequest {
+  string sandbox_id = 1;
+  string capability = 2;
+}
+
+message SnapshotRequest {
+  string sandbox_id = 1;
+  bool full_process = 2;
+}
+
+message SnapshotInfo {
+  string snapshot_id = 1;
+  uint64 size_bytes = 2;
+  bool dirty = 3;
+}
+
+message RestoreRequest {
+  string snapshot_id = 1;
+  string template = 2;
+}
+
+message StreamEventsRequest {
+  string sandbox_id = 1;
+  repeated EventKind kinds = 2;
+  repeated EventDecision decisions = 3;
+}
+
+message Event {
+  string sandbox_id = 1;
+  uint64 cgroup_id = 2;
+  string turn_id = 3;
+  google.protobuf.Timestamp ts = 4;
+  EventKind kind = 5;
+  EventDecision decision = 6;
+  string subject = 7;
+  int32 errno = 8;
+  uint32 pid = 9;
+  string comm = 10;
+  uint64 seq = 11;
+  uint32 dropped_count = 12;
+}
+
+message SandboxPolicy {
+  string yaml = 1;
+}
+
+message SandboxStats {
+  uint64 memory_current = 1;
+  uint64 pids_current = 2;
+  string cpu_stat = 3;
+}
+
+enum SandboxState {
+  PROVISIONING = 0;
+  READY = 1;
+  RUNNING = 2;
+  PAUSED = 3;
+  CHECKPOINTING = 4;
+  RESTORING = 5;
+  TERMINATING = 6;
+  TERMINATED = 7;
+}
+
+enum EventKind {
+  FILE_OPEN = 0;
+  EXEC = 1;
+  CONNECT = 2;
+  MOUNT = 3;
+  POLICY_DENY = 4;
+  RESOURCE_PRESSURE = 5;
+  LIFECYCLE = 6;
+  BROKER_CALL = 7;
+}
+
+enum EventDecision {
+  ALLOW = 0;
+  DENY = 1;
+  NOTIFY = 2;
+  KILL = 3;
+}

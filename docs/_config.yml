@@ -1,0 +1,10 @@
+title: AIVisor
+description: eBPF-driven Linux sandbox runtime for autonomous AI agents
+theme: jekyll-theme-cayman
+markdown: GFM
+highlighter: rouge
+
+exclude:
+  - rfcs/
+  - api/
+  - vendor/

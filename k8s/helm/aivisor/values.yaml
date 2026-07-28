@@ -1,0 +1,44 @@
+# AIVisor Helm chart values
+
+# Daemon configuration
+aivisord:
+  image: aivisor/aivisord:0.1.0
+  replicas: 1
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "500m"
+    limits:
+      memory: "1Gi"
+      cpu: "2"
+
+# Node requirements
+nodeSelector:
+  kubernetes.io/os: linux
+
+tolerations:
+  - key: "aivisor.dev/kernel"
+    operator: "Exists"
+    effect: "NoSchedule"
+
+# Security context (privileged for cgroup/BPF access)
+securityContext:
+  privileged: true
+  capabilities:
+    add:
+      - SYS_ADMIN
+      - SYS_RESOURCE
+      - BPF
+      - CHECKPOINT_RESTORE
+  hostPID: true
+
+volumes:
+  - name: cgroup
+    hostPath:
+      path: /sys/fs/cgroup
+  - name: bpf
+    hostPath:
+      path: /sys/fs/bpf
+  - name: modules
+    hostPath:
+      path: /sys/kernel/btf
