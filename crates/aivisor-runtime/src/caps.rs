@@ -119,7 +119,7 @@ mod tests {
     fn test_cap_probe_ceiling_covers_known_caps() {
         // CAP_CHECKPOINT_RESTORE = 40 (kernel 5.9). The probe ceiling must
         // stay above every capability number the kernel currently defines.
-        assert!(abi::CAP_PROBE_CEILING >= 40);
+        const { assert!(abi::CAP_PROBE_CEILING >= 40) };
     }
 
     #[test]

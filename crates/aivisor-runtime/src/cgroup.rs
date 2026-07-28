@@ -248,7 +248,6 @@ fn wait_for_empty(populated_path: &Path, timeout: Duration) -> Result<(), Error>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsStr;
 
     #[test]
     fn test_cgroup_id_from_stat() {
