@@ -98,14 +98,14 @@ pub(crate) fn path_cstring(p: &Path) -> Result<CString, Error> {
         .map_err(|e| Error::MountSetup(format!("interior NUL in path {}: {e}", p.display())))
 }
 
-#[cfg(test)]
+// Rootfs::prepare creates its sandbox dir under the real /run/aivisor,
+// which requires root — same reason manager.rs's create/destroy tests are
+// gated the same way. The whole module is gated, not just the test fn,
+// since `use super::*` would otherwise be unused with the feature off.
+#[cfg(all(test, feature = "privileged-tests"))]
 mod tests {
     use super::*;
 
-    // Rootfs::prepare creates its sandbox dir under the real /run/aivisor,
-    // which requires root — same reason manager.rs's create/destroy tests
-    // are gated the same way.
-    #[cfg(feature = "privileged-tests")]
     #[test]
     fn test_rootfs_prepare_paths() {
         let tmp = std::env::temp_dir().join(format!("aivisor-rootfs-test-{}", std::process::id()));
