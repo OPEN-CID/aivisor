@@ -33,28 +33,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang llvm libbpf-dev linux-tools-common linux-tools-generic
 
-      - name: Generate vmlinux.h against this runner's kernel
-        run: |
-          # Find bpftool: first check PATH, then scan the linux-tools versioned dirs.
-          # The glob in the latter path may match multiple kernel versions
-          # (e.g. 5.15.0-1078-azure and 5.15.0-1078-azure-generic), so we loop
-          # instead of expanding straight into test -x.
-          BPFTOOL=""
-          if command -v bpftool &>/dev/null; then
-            BPFTOOL=$(command -v bpftool)
-          else
-            for f in /usr/lib/linux-tools/*/bpftool; do
-              if [ -x "$f" ]; then
-                BPFTOOL="$f"
-                break
-              fi
-            done
-          fi
-          if [ -n "$BPFTOOL" ] && [ -r /sys/kernel/btf/vmlinux ]; then
-            "$BPFTOOL" btf dump file /sys/kernel/btf/vmlinux format c > crates/aivisor-bpf/src/bpf/vmlinux.h
-          else
-            echo "::warning::no /sys/kernel/btf/vmlinux or bpftool on this runner — BPF programs will not be compiled this run (build.rs degrades to a warning, not a failure; see its header comment)"
-          fi
+      # vmlinux.h is intentionally NOT generated here — build.rs in
+      # aivisor-bpf degrades gracefully when it's absent (it prints a
+      # cargo:warning and skips BPF compilation), so running bpftool on
+      # a GitHub-hosted runner (where /sys/kernel/btf/vmlinux and/or
+      # bpftool may be unavailable or version-mismatched) is an unnecessary
+      # CI gate. Developers generate it locally via `bpftool btf dump ...`
+      # when working on BPF programs; see crates/aivisor-bpf/build.rs.
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
