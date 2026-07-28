@@ -58,7 +58,7 @@ impl BpfLoader {
                 .load()
                 .map_err(|e| Error::LaunchFailed(format!("load BPF object {name}: {e}")))?;
 
-            for mut prog in obj.progs_mut() {
+            for prog in obj.progs_mut() {
                 match prog.prog_type() {
                     ProgramType::CgroupSockAddr => {
                         // Deferred: attached per-sandbox-cgroup by the
