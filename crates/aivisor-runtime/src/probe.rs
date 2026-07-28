@@ -89,7 +89,7 @@ fn probe_cgroup_kill() -> bool {
         && std::fs::read_dir("/sys/fs/cgroup")
             .map(|mut entries| {
                 entries.any(|e| {
-                    e.ok().map_or(false, |e| {
+                    e.ok().is_some_and(|e| {
                         let path = e.path().join("cgroup.kill");
                         path.exists()
                     })

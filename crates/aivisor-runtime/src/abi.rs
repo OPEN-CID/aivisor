@@ -49,12 +49,19 @@ pub struct CapUserData {
 }
 
 /// capset(2) has no libc wrapper here; SYS_capset is a verified per-arch
-/// constant. Safety: `header` and `data` must be valid for the duration of
-/// the call and `data` must point to 2 `CapUserData` entries for VERSION_3.
+/// constant.
+///
+/// # Safety
+/// `header` and `data` must be valid for the duration of the call and
+/// `data` must point to 2 `CapUserData` entries for VERSION_3.
 pub unsafe fn capset(header: *mut CapUserHeader, data: *const CapUserData) -> c_long {
     libc::syscall(libc::SYS_capset, header, data)
 }
 
+/// # Safety
+/// `option` must be a valid `PR_*` prctl(2) operation and `arg2`..`arg5`
+/// must be whatever that operation expects (some are ignored, some are
+/// pointers the kernel will read or write through).
 pub unsafe fn prctl(option: c_int, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> c_long {
     libc::syscall(libc::SYS_prctl, option, arg2, arg3, arg4, arg5)
 }
@@ -86,6 +93,10 @@ pub struct LandlockPathBeneathAttr {
     pub parent_fd: c_int,
 }
 
+/// # Safety
+/// `attr` must be either null (only valid together with the
+/// `LANDLOCK_CREATE_RULESET_VERSION` flag) or point to a valid, initialized
+/// `LandlockRulesetAttr` of exactly `size` bytes.
 pub unsafe fn landlock_create_ruleset(
     attr: *const LandlockRulesetAttr,
     size: usize,
@@ -94,6 +105,10 @@ pub unsafe fn landlock_create_ruleset(
     libc::syscall(libc::SYS_landlock_create_ruleset, attr, size, flags)
 }
 
+/// # Safety
+/// `ruleset_fd` must be a valid fd returned by `landlock_create_ruleset`
+/// and `rule_attr` must point to a valid, initialized
+/// `LandlockPathBeneathAttr` matching `rule_type`.
 pub unsafe fn landlock_add_rule(
     ruleset_fd: c_int,
     rule_type: c_int,
@@ -109,6 +124,10 @@ pub unsafe fn landlock_add_rule(
     )
 }
 
+/// # Safety
+/// `ruleset_fd` must be a valid fd returned by `landlock_create_ruleset`.
+/// On success the calling thread is irreversibly confined by the ruleset
+/// for the rest of its lifetime.
 pub unsafe fn landlock_restrict_self(ruleset_fd: c_int, flags: u32) -> c_long {
     libc::syscall(libc::SYS_landlock_restrict_self, ruleset_fd, flags)
 }
@@ -148,7 +167,8 @@ pub struct CloneArgs {
 /// Raw `clone3(2)`. With `stack`/`stack_size` left at 0 this behaves like
 /// `fork()`: returns twice, 0 in the child and the child pid in the parent.
 ///
-/// Safety: after this returns 0 (in the child) of a multi-threaded parent,
+/// # Safety
+/// After this returns 0 (in the child) of a multi-threaded parent,
 /// only async-signal-safe operations are well-defined until `execve()` —
 /// the child has exactly one thread (the calling one) and any lock held by
 /// another parent thread at the moment of the call is held forever. The
@@ -167,6 +187,10 @@ pub unsafe fn clone3(args: &mut CloneArgs) -> c_long {
 // ---- mount(2) / umount2(2) ----
 pub const MNT_DETACH: c_int = 2;
 
+/// # Safety
+/// `source`, `target`, and `fstype` (when non-null) must be valid,
+/// NUL-terminated C strings, and `data` (when non-null) must be valid for
+/// whatever `fstype`'s mount option parser expects to read from it.
 pub unsafe fn mount(
     source: *const libc::c_char,
     target: *const libc::c_char,
@@ -177,10 +201,18 @@ pub unsafe fn mount(
     libc::syscall(libc::SYS_mount, source, target, fstype, flags, data)
 }
 
+/// # Safety
+/// `target` must be a valid, NUL-terminated C string.
 pub unsafe fn umount2(target: *const libc::c_char, flags: c_int) -> c_long {
     libc::syscall(libc::SYS_umount2, target, flags)
 }
 
+/// # Safety
+/// `new_root` and `put_old` must be valid, NUL-terminated C strings naming
+/// paths that satisfy pivot_root(2)'s constraints (both must be mount
+/// points, `put_old` must be beneath `new_root`, etc.) — the kernel
+/// validates these, but a bad path here still changes the process's root
+/// out from under any code that assumed the previous layout.
 pub unsafe fn pivot_root(new_root: *const libc::c_char, put_old: *const libc::c_char) -> c_long {
     libc::syscall(libc::SYS_pivot_root, new_root, put_old)
 }

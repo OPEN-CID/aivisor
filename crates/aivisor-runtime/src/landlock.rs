@@ -38,7 +38,7 @@ pub fn probe_landlock_abi(min_abi: u32) -> Result<u32, Error> {
 pub fn apply_landlock(plan: &LandlockPlan) -> Result<(), Error> {
     let handled = landlock_bits::known_at_abi(plan.abi);
 
-    let mut ruleset_attr = abi::LandlockRulesetAttr {
+    let ruleset_attr = abi::LandlockRulesetAttr {
         handled_access_fs: handled,
         // Network scoping (ABI>=4) is intentionally left unhandled here —
         // egress is enforced at L5 (eBPF LSM), not duplicated in Landlock.
@@ -47,7 +47,7 @@ pub fn apply_landlock(plan: &LandlockPlan) -> Result<(), Error> {
 
     let ruleset_fd = unsafe {
         abi::landlock_create_ruleset(
-            &mut ruleset_attr,
+            &ruleset_attr,
             std::mem::size_of::<abi::LandlockRulesetAttr>(),
             0,
         )
@@ -74,7 +74,7 @@ pub fn apply_landlock(plan: &LandlockPlan) -> Result<(), Error> {
         }
 
         let target_fd = open_dir_fd(&rule.path)?;
-        let mut path_beneath = abi::LandlockPathBeneathAttr {
+        let path_beneath = abi::LandlockPathBeneathAttr {
             allowed_access: access_mask,
             parent_fd: target_fd.as_raw_fd(),
         };
@@ -83,7 +83,7 @@ pub fn apply_landlock(plan: &LandlockPlan) -> Result<(), Error> {
             abi::landlock_add_rule(
                 ruleset_fd,
                 abi::LANDLOCK_RULE_PATH_BENEATH,
-                &mut path_beneath,
+                &path_beneath,
                 0,
             )
         };

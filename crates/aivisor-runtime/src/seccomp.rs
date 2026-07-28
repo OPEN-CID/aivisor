@@ -96,7 +96,9 @@ fn nr_offset() -> u32 {
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 const AUDIT_ARCH_X86_64: u32 = 0xc000003e;
+#[cfg(target_arch = "aarch64")]
 const AUDIT_ARCH_AARCH64: u32 = 0xc00000b7;
 
 /// Kill anything that isn't running as the one architecture the filter's

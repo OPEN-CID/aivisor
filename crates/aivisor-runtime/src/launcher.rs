@@ -417,8 +417,7 @@ fn kill_via_pidfd(pidfd: RawFd) {
 }
 
 fn send_msg(sock: &mut UnixStream, msg: &ChildMsg) -> std::io::Result<()> {
-    let bytes =
-        serde_json::to_vec(msg).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let bytes = serde_json::to_vec(msg).map_err(std::io::Error::other)?;
     let len = (bytes.len() as u32).to_le_bytes();
     sock.write_all(&len)?;
     sock.write_all(&bytes)
