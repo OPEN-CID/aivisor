@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: aivisord
+  labels:
+    app: aivisord
+spec:
+  selector:
+    matchLabels:
+      app: aivisord
+  template:
+    metadata:
+      labels:
+        app: aivisord
+    spec:
+      hostPID: true
+      nodeSelector:
+        kubernetes.io/os: linux
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
+      containers:
+        - name: aivisord
+          image: {{ .Values.aivisord.image }}
+          securityContext:
+            privileged: {{ .Values.securityContext.privileged }}
+            capabilities:
+              add: {{ toYaml .Values.securityContext.capabilities | nindent 16 }}
+          resources:
+            {{- toYaml .Values.aivisord.resources | nindent 12 }}
+          volumeMounts:
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
+            - name: bpf
+              mountPath: /sys/fs/bpf
+            - name: modules
+              mountPath: /sys/kernel/btf
+          env:
+            - name: RUST_LOG
+              value: "info"
+      volumes:
+        {{- toYaml .Values.volumes | nindent 8 }}

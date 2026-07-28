@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# This workflow runs what a GitHub-hosted runner can actually do: build,
+# lint, format-check, and the unit test suites that don't need root or a
+# specific kernel LSM configuration. It deliberately does NOT claim to run
+# the privileged integration tests (tests/*.rs behind --features
+# privileged-tests) or bench/escape — those need root, cgroup v2 delegation,
+# and (for the eBPF LSM suite) CONFIG_BPF_LSM=y with `bpf` in the `lsm=`
+# boot parameter, none of which a hosted runner reliably provides. Running
+# them here and having them silently no-op (as the placeholder tests do
+# without the feature flag) would be exactly the "looks like a gate, isn't
+# one" problem this workflow exists to avoid. See the privileged-tests job
+# below for what that actually requires.
+
+jobs:
+  build-lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install BPF toolchain (clang, libbpf headers, bpftool)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev linux-tools-common linux-tools-generic
+
+      - name: Generate vmlinux.h against this runner's kernel
+        run: |
+          BPFTOOL=$(command -v bpftool || echo /usr/lib/linux-tools/*/bpftool)
+          if [ -r /sys/kernel/btf/vmlinux ] && [ -x "$BPFTOOL" ]; then
+            "$BPFTOOL" btf dump file /sys/kernel/btf/vmlinux format c > crates/aivisor-bpf/src/bpf/vmlinux.h
+          else
+            echo "::warning::no /sys/kernel/btf/vmlinux or bpftool on this runner — BPF programs will not be compiled this run (build.rs degrades to a warning, not a failure; see its header comment)"
+          fi
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo build --workspace
+        run: cargo build --workspace --all-targets
+
+      - name: cargo clippy --workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+  # Requires a self-hosted runner: root, cgroup v2 with the aivisor
+  # controllers delegatable, and a kernel booted with
+  # lsm=...,landlock,bpf and CONFIG_BPF_LSM=y (blueprint.md §11.5). Do not
+  # point this at a GitHub-hosted runner — those don't grant the
+  # capabilities Landlock/eBPF LSM/user-namespace cgroup delegation need,
+  # and a job that can't actually exercise the escape suite must not be
+  # allowed to report green as if it did.
+  privileged-tests:
+    if: false # flip on once a self-hosted runner with the above is registered
+    runs-on: [self-hosted, linux, aivisor-privileged]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: cargo test --workspace --features privileged-tests
+        run: sudo -E cargo test --workspace --features privileged-tests
+      - name: build escape scenario binaries
+        run: cargo build --release -p aivisor-escape-bench --features privileged-tests
+      - name: bench/escape suite (must be 0 successful escapes)
+        run: sudo -E ./target/release/escape-harness

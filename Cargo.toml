@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aivisor-core",
+    "crates/aivisor-policy",
+    "crates/aivisor-broker",
+    "crates/aivisor-snapshot",
+    "crates/aivisor-runtime",
+    "crates/aivisor-cli",
+    "crates/aivisor-bpf",
+    "crates/aivisord",
+    "bench/escape",
+]
+# Portable crates (core, policy, broker, snapshot) compile on any platform.
+# Linux-only crates (runtime, cli, bpf, aivisord, bench/escape) require
+# nix/libc/libbpf and only compile on Linux >= 6.1 with BPF LSM + Landlock.
+# Build on Windows: cargo build -p aivisor-core -p aivisor-policy -p aivisor-broker -p aivisor-snapshot
+# Build on Linux:   cargo build --workspace
+
+[workspace.dependencies]
+rustix = { version = "0.38", features = ["fs", "process", "mount", "time", "net", "termios", "pipe", "stdio", "thread", "param"] }
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+uuid = { version = "1", features = ["v7", "serde"] }
+clap = { version = "4", features = ["derive"] }
+camino = { version = "1", features = ["serde1"] }
+anyhow = "1"
+nix = { version = "0.29", features = ["fs", "process", "mount", "sched", "user", "signal"] }
+tokio = { version = "1", features = ["full"] }

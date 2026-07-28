@@ -1,0 +1,35 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sandboxtemplates.aivisor.dev
+spec:
+  group: aivisor.dev
+  names:
+    kind: SandboxTemplate
+    plural: sandboxtemplates
+    singular: sandboxtemplate
+    shortNames:
+      - avtp
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                baseImage:
+                  type: string
+                defaultPolicy:
+                  type: string
+                warmPoolSize:
+                  type: integer
+                  default: 5
+                resourceDefaults:
+                  type: object
+              required:
+                - baseImage

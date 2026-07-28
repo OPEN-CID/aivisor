@@ -1,0 +1,11 @@
+apiVersion: v2
+name: aivisor
+description: AIVisor — lightweight eBPF-driven sandbox runtime for AI agents
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - sandbox
+  - ai-agents
+  - security
+  - eBPF
