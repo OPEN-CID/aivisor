@@ -3,6 +3,14 @@ name = "aivisor-cli"
 version = "0.1.0"
 edition = "2021"
 
+# Package name is aivisor-cli (matches the crate directory), but every doc
+# (README, quickstart, deployment, roadmap) invokes the built binary as
+# `aivisor` / `target/release/aivisor`. Without this override cargo emits
+# `aivisor-cli` and every documented command line is wrong.
+[[bin]]
+name = "aivisor"
+path = "src/main.rs"
+
 [dependencies]
 aivisor-core = { path = "../aivisor-core" }
 aivisor-runtime = { path = "../aivisor-runtime" }

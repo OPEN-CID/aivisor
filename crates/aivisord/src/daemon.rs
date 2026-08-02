@@ -38,7 +38,19 @@ impl Daemon {
 
     /// Run the gRPC server.
     pub async fn run(&self, socket_path: &str) -> Result<(), Error> {
-        let _ = Path::new(socket_path).parent().map(std::fs::create_dir_all);
+        // Fail closed: if the runtime directory that will hold the daemon
+        // socket cannot be created, there is no recovering later — the
+        // listener would have nowhere to bind. Previously this discarded the
+        // result, so a permission problem here surfaced as an unexplained
+        // missing socket rather than an error at the point it happened.
+        if let Some(parent) = Path::new(socket_path).parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                Error::LaunchFailed(format!(
+                    "failed to create daemon socket directory {}: {e}",
+                    parent.display()
+                ))
+            })?;
+        }
 
         let _refill_handle = self.warm_pool.spawn_refill_task(WARM_POOL_REFILL_INTERVAL);
 

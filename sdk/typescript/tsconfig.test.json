@@ -1,0 +1,11 @@
+{
+  // Type-checks the tests alongside the library. The build config
+  // (tsconfig.json) deliberately compiles `src` only, so tests never end up
+  // in the published `dist`.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": ["src", "test"]
+}

@@ -9,6 +9,6 @@ Usage:
         print(r.stdout)                        # "4\\n"
 """
 
-from .client import Client, SandboxHandle, ExecResult
+from .client import Client, ExecResult, ProtocolError, SandboxHandle
 
-__all__ = ["Client", "SandboxHandle", "ExecResult"]
+__all__ = ["Client", "ExecResult", "ProtocolError", "SandboxHandle"]

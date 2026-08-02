@@ -17,6 +17,10 @@
 //! (images/base/build.sh is currently a stub — see that file's own TODO).
 //! Until a real base image exists, these tests fail at `manager.create()`
 //! or the `exec()` overlay mount, not because confinement is broken.
+//!
+//! Without the feature this file compiles to nothing — deliberately, rather
+//! than to a test that prints "skipping" and reports green, which would make
+//! an un-run gate look like a passing one in the CI summary.
 
 #[cfg(feature = "privileged-tests")]
 mod hostile_tests {
@@ -158,12 +162,11 @@ mod hostile_tests {
             &id,
             r#"
             fn main() {
-                // Re-exec ourselves as a child to prove the denial is
-                // inherited, not just true for the directly-exec'd process.
-                let exe = std::env::current_exe().unwrap();
-                let status = std::process::Command::new(exe)
-                    .env("HOSTILE_CHILD", "1")
-                    .status();
+                // The child branch MUST be tested before spawning anything:
+                // checking it afterwards makes every generation spawn the
+                // next one first, which is an unbounded fork bomb inside a
+                // sandbox whose pids.max we are also relying on. Ask "am I
+                // the child?" first, do the denied read, and exit.
                 if std::env::var("HOSTILE_CHILD").is_ok() {
                     match std::fs::read_to_string("/etc/shadow") {
                         Ok(_) => std::process::exit(1),
@@ -171,7 +174,15 @@ mod hostile_tests {
                         Err(_) => std::process::exit(2),
                     }
                 }
-                match status {
+
+                // Parent: re-exec ourselves as a child to prove the denial is
+                // inherited, not just true for the directly-exec'd process,
+                // and propagate the child's verdict as our own.
+                let exe = match std::env::current_exe() {
+                    Ok(e) => e,
+                    Err(_) => std::process::exit(2),
+                };
+                match std::process::Command::new(exe).env("HOSTILE_CHILD", "1").status() {
                     Ok(s) => std::process::exit(s.code().unwrap_or(2)),
                     Err(_) => std::process::exit(2),
                 }
@@ -185,10 +196,4 @@ mod hostile_tests {
             "expected Landlock denial to be inherited by a child process, not just the top-level exec"
         );
     }
-}
-
-#[cfg(not(feature = "privileged-tests"))]
-#[test]
-fn test_hostile_placeholder() {
-    eprintln!("Skipping hostile tests: requires --features privileged-tests on Linux");
 }

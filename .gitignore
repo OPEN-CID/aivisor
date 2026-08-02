@@ -6,7 +6,10 @@
 *.bc
 .env
 sdk/python/__pycache__/
+sdk/python/**/__pycache__/
 sdk/python/*.egg-info/
+sdk/python/build/
+sdk/python/dist/
 sdk/typescript/dist/
 sdk/typescript/node_modules/
 k8s/controller/bin/
