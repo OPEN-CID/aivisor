@@ -129,13 +129,11 @@ mod run {
             let workspace = manager
                 .workspace_upper_dir(&id)
                 .map_err(|e| format!("workspace_upper_dir: {e}"))?;
-            std::fs::create_dir_all(&workspace)
-                .map_err(|e| format!("mkdir workspace: {e}"))?;
+            std::fs::create_dir_all(&workspace).map_err(|e| format!("mkdir workspace: {e}"))?;
 
             let host_bin = sibling_bin_path(sc.bin_name)?;
             let staged = workspace.join("scenario");
-            std::fs::copy(&host_bin, &staged)
-                .map_err(|e| format!("stage scenario binary: {e}"))?;
+            std::fs::copy(&host_bin, &staged).map_err(|e| format!("stage scenario binary: {e}"))?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;

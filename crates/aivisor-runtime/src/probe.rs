@@ -81,7 +81,7 @@ fn probe_clone3() -> bool {
 
 fn probe_clone_into_cgroup() -> bool {
     let ver = probe_kernel_version();
-    (ver.0 > 5 || (ver.0 == 5 && ver.1 >= 7))
+    ver.0 > 5 || (ver.0 == 5 && ver.1 >= 7)
 }
 
 fn probe_cgroup_kill() -> bool {
@@ -89,7 +89,7 @@ fn probe_cgroup_kill() -> bool {
         && std::fs::read_dir("/sys/fs/cgroup")
             .map(|mut entries| {
                 entries.any(|e| {
-                    e.ok().map_or(false, |e| {
+                    e.ok().is_some_and(|e| {
                         let path = e.path().join("cgroup.kill");
                         path.exists()
                     })
@@ -98,13 +98,92 @@ fn probe_cgroup_kill() -> bool {
             .unwrap_or(false)
 }
 
+/// `/sys/module/overlay` only exists once something has already loaded the
+/// module — on a fresh host where `CONFIG_OVERLAY_FS=m` (the common case;
+/// see e.g. Ubuntu's generic kernel) and nothing has mounted an overlay yet,
+/// that path is absent even though overlayfs is fully available and will
+/// autoload on first use. A static path check therefore produces a false
+/// negative for exactly the machine state a fresh install starts in.
+/// Probing by a real, scratch-directory mount+unmount (matching how
+/// `probe_clone3` already probes by attempting the real syscall, not by
+/// inspecting a proxy for it) is the only way to know for certain.
 fn probe_overlayfs() -> bool {
-    Path::new("/sys/module/overlay").exists()
+    // Keyed on PID *and* a fresh UUID: `cargo test` runs multiple tests as
+    // threads inside one process, so PID alone is not unique enough to keep
+    // two concurrent probe calls from colliding on the same mount point.
+    let base = std::env::temp_dir().join(format!(
+        "aivisor-probe-overlay-{}-{}",
+        std::process::id(),
+        uuid::Uuid::now_v7()
+    ));
+    let lower = base.join("lower");
+    let upper = base.join("upper");
+    let work = base.join("work");
+    let merged = base.join("merged");
+
+    let created = [&lower, &upper, &work, &merged]
+        .iter()
+        .all(|d| fs::create_dir_all(d).is_ok());
+    if !created {
+        let _ = fs::remove_dir_all(&base);
+        return false;
+    }
+
+    let result = try_mount_overlay(&lower, &upper, &work, &merged);
+    if result {
+        unsafe {
+            let merged_c = match std::ffi::CString::new(merged.to_string_lossy().as_bytes()) {
+                Ok(c) => c,
+                Err(_) => {
+                    let _ = fs::remove_dir_all(&base);
+                    return result;
+                }
+            };
+            crate::abi::umount2(merged_c.as_ptr(), 0);
+        }
+    }
+    let _ = fs::remove_dir_all(&base);
+    result
+}
+
+fn try_mount_overlay(lower: &Path, upper: &Path, work: &Path, merged: &Path) -> bool {
+    let Ok(overlay_src) = std::ffi::CString::new("overlay") else {
+        return false;
+    };
+    let Ok(overlay_fstype) = std::ffi::CString::new("overlay") else {
+        return false;
+    };
+    let Some(merged_str) = merged.to_str() else {
+        return false;
+    };
+    let Ok(merged_c) = std::ffi::CString::new(merged_str) else {
+        return false;
+    };
+    let data = format!(
+        "lowerdir={},upperdir={},workdir={}",
+        lower.display(),
+        upper.display(),
+        work.display()
+    );
+    let Ok(data_c) = std::ffi::CString::new(data) else {
+        return false;
+    };
+
+    let ret = unsafe {
+        crate::abi::mount(
+            overlay_src.as_ptr(),
+            merged_c.as_ptr(),
+            overlay_fstype.as_ptr(),
+            (libc::MS_NODEV | libc::MS_NOSUID) as libc::c_ulong,
+            data_c.as_ptr() as *const libc::c_void,
+        )
+    };
+    ret == 0
 }
 
 fn probe_overlayfs_in_userns() -> bool {
     let ver = probe_kernel_version();
-    (ver.0 > 5 || (ver.0 == 5 && ver.1 >= 11))
+    ver.0 > 5 || (ver.0 == 5 && ver.1 >= 11)
 }
 
 fn probe_unprivileged_userns() -> bool {

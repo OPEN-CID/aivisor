@@ -1,18 +1,16 @@
 // AIVisor Kubernetes controller
 //
 // This is a Go controller using controller-runtime that reconciles
-// AIVisorSandbox, SandboxTemplate, and WarmPool CRDs.
+// AIVisorSandbox and SandboxTemplate CRDs.
 //
 // Build: go build -o aivisor-controller ./k8s/controller/
 //
 // Requires: Go 1.22+, controller-runtime v0.19+
-
 package main
 
 import (
 	"context"
 	"flag"
-	"fmt"
 	"os"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -20,7 +18,11 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	aivisorv1alpha1 "github.com/OPEN-CID/aivisor/k8s/controller/api/v1alpha1"
 )
 
 var (
@@ -30,7 +32,7 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	// TODO: Add AIVisor CRD types to scheme
+	utilruntime.Must(aivisorv1alpha1.AddToScheme(scheme))
 }
 
 // AIVisorSandboxReconciler reconciles AIVisorSandbox resources.
@@ -40,12 +42,24 @@ type AIVisorSandboxReconciler struct {
 
 func (r *AIVisorSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrl.Log.WithValues("aivisorsandbox", req.NamespacedName)
+
+	var sandbox aivisorv1alpha1.AIVisorSandbox
+	if err := r.Get(ctx, req.NamespacedName, &sandbox); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
 	log.Info("Reconciling AIVisorSandbox")
 
 	// TODO(phase4): call aivisord gRPC CreateSandbox/DestroySandbox
 	// based on the CR's current state and finalizer.
 
 	return ctrl.Result{}, nil
+}
+
+func (r *AIVisorSandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&aivisorv1alpha1.AIVisorSandbox{}).
+		Complete(r)
 }
 
 func main() {
@@ -56,18 +70,27 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		MetricsBindAddress:     metricsAddr,
-		LeaderElection:         true,
-		LeaderElectionID:       "aivisor-controller.aivisor.dev",
+		Scheme:           scheme,
+		Metrics:          metricsserver.Options{BindAddress: metricsAddr},
+		LeaderElection:   true,
+		LeaderElectionID: "aivisor-controller.aivisor.dev",
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
 
-	if err = (&AIVisorSandboxReconciler{}).SetupWithManager(mgr); err != nil {
+	if err = (&AIVisorSandboxReconciler{Client: mgr.GetClient()}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller")
+		os.Exit(1)
+	}
+
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		setupLog.Error(err, "unable to set up health check")
+		os.Exit(1)
+	}
+	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
 
@@ -76,10 +99,4 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
-}
-
-func (r *AIVisorSandboxReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&AIVisorSandboxReconciler{}).
-		Complete(r)
 }

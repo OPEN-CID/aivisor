@@ -177,6 +177,7 @@ fn cmd_doctor() -> anyhow::Result<()> {
 
 const CLI_POLICY_NAME: &str = "cli-policy";
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_run(
     template: String,
     cpu: Option<String>,
@@ -188,7 +189,7 @@ fn cmd_run(
     policy: Option<std::path::PathBuf>,
     cmd: Vec<String>,
 ) -> anyhow::Result<()> {
-    if cmd.first().map_or(true, |c| !c.starts_with('/')) {
+    if cmd.first().is_none_or(|c| !c.starts_with('/')) {
         anyhow::bail!(
             "cmd must be an absolute path inside the sandbox (e.g. /usr/bin/python3, not \
              python3) — aivisor does not perform PATH lookup"
@@ -223,8 +224,9 @@ fn cmd_run(
     }
 
     if let Some(ref mem_str) = memory {
-        limits.memory_max = Some(parse_size(mem_str)?);
-        limits.memory_high = Some(limits.memory_max.unwrap() * 9 / 10);
+        let mem_max = parse_size(mem_str).map_err(|e| anyhow::anyhow!(e))?;
+        limits.memory_max = Some(mem_max);
+        limits.memory_high = Some(mem_max * 9 / 10);
     }
 
     if let Some(p) = pids {
@@ -274,7 +276,7 @@ fn cmd_ps() -> anyhow::Result<()> {
     if list.is_empty() {
         println!("No running sandboxes");
     } else {
-        println!("{:<40} {:<15} {}", "ID", "STATE", "TEMPLATE");
+        println!("{:<40} {:<15} TEMPLATE", "ID", "STATE");
         println!("{}", "-".repeat(75));
         for sb in &list {
             println!("{:<40} {:<15?} {}", sb.id, sb.state, sb.template);
@@ -341,18 +343,18 @@ fn parse_sandbox_id(s: &str) -> anyhow::Result<SandboxId> {
 
 fn parse_size(s: &str) -> Result<u64, String> {
     let s = s.trim();
-    let (num_str, unit) = if s.ends_with("Gi") {
-        (&s[..s.len() - 2], 1073741824u64)
-    } else if s.ends_with("Mi") {
-        (&s[..s.len() - 2], 1048576u64)
-    } else if s.ends_with("Ki") {
-        (&s[..s.len() - 2], 1024u64)
-    } else if s.ends_with('G') {
-        (&s[..s.len() - 1], 1000000000u64)
-    } else if s.ends_with('M') {
-        (&s[..s.len() - 1], 1000000u64)
-    } else if s.ends_with('K') {
-        (&s[..s.len() - 1], 1000u64)
+    let (num_str, unit) = if let Some(stripped) = s.strip_suffix("Gi") {
+        (stripped, 1073741824u64)
+    } else if let Some(stripped) = s.strip_suffix("Mi") {
+        (stripped, 1048576u64)
+    } else if let Some(stripped) = s.strip_suffix("Ki") {
+        (stripped, 1024u64)
+    } else if let Some(stripped) = s.strip_suffix('G') {
+        (stripped, 1000000000u64)
+    } else if let Some(stripped) = s.strip_suffix('M') {
+        (stripped, 1000000u64)
+    } else if let Some(stripped) = s.strip_suffix('K') {
+        (stripped, 1000u64)
     } else {
         (s, 1)
     };
@@ -362,23 +364,23 @@ fn parse_size(s: &str) -> Result<u64, String> {
 
 fn parse_duration(s: &str) -> Result<std::time::Duration, String> {
     let s = s.trim();
-    if s.ends_with('s') {
-        let secs: u64 = s[..s.len() - 1]
+    if let Some(stripped) = s.strip_suffix('s') {
+        let secs: u64 = stripped
             .parse()
             .map_err(|_| format!("invalid duration: {s}"))?;
         Ok(std::time::Duration::from_secs(secs))
-    } else if s.ends_with("ms") {
-        let ms: u64 = s[..s.len() - 2]
+    } else if let Some(stripped) = s.strip_suffix("ms") {
+        let ms: u64 = stripped
             .parse()
             .map_err(|_| format!("invalid duration: {s}"))?;
         Ok(std::time::Duration::from_millis(ms))
-    } else if s.ends_with('m') {
-        let mins: u64 = s[..s.len() - 1]
+    } else if let Some(stripped) = s.strip_suffix('m') {
+        let mins: u64 = stripped
             .parse()
             .map_err(|_| format!("invalid duration: {s}"))?;
         Ok(std::time::Duration::from_secs(mins * 60))
-    } else if s.ends_with('h') {
-        let hrs: u64 = s[..s.len() - 1]
+    } else if let Some(stripped) = s.strip_suffix('h') {
+        let hrs: u64 = stripped
             .parse()
             .map_err(|_| format!("invalid duration: {s}"))?;
         Ok(std::time::Duration::from_secs(hrs * 3600))

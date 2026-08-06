@@ -30,10 +30,10 @@ int BPF_PROG(aivisor_sb_mount, const struct path *path, const char *dev_name,
         return ret;
 
     __u64 cgid = bpf_get_current_cgroup_id();
-    struct sandbox_ctx *ctx = bpf_map_lookup_elem(&sandboxes, &cgid);
-    if (!ctx)
+    struct sandbox_ctx *sctx = bpf_map_lookup_elem(&sandboxes, &cgid);
+    if (!sctx)
         return 0;
-    if (!(ctx->flags & FLAG_ENFORCING))
+    if (!(sctx->flags & FLAG_ENFORCING))
         return 0;
 
     /* Deny all mounts from sandbox tasks. Landlock already covers this,
@@ -49,10 +49,10 @@ int BPF_PROG(aivisor_ptrace_access_check, struct task_struct *child, unsigned in
         return ret;
 
     __u64 cgid = bpf_get_current_cgroup_id();
-    struct sandbox_ctx *ctx = bpf_map_lookup_elem(&sandboxes, &cgid);
-    if (!ctx)
+    struct sandbox_ctx *sctx = bpf_map_lookup_elem(&sandboxes, &cgid);
+    if (!sctx)
         return 0;
-    if (!(ctx->flags & FLAG_ENFORCING))
+    if (!(sctx->flags & FLAG_ENFORCING))
         return 0;
 
     /* Deny cross-process inspection. */
@@ -67,14 +67,14 @@ int BPF_PROG(aivisor_bpf, int cmd, union bpf_attr *attr, unsigned int size, int 
         return ret;
 
     __u64 cgid = bpf_get_current_cgroup_id();
-    struct sandbox_ctx *ctx = bpf_map_lookup_elem(&sandboxes, &cgid);
-    if (!ctx)
+    struct sandbox_ctx *sctx = bpf_map_lookup_elem(&sandboxes, &cgid);
+    if (!sctx)
         return 0;
-    if (!(ctx->flags & FLAG_ENFORCING))
+    if (!(sctx->flags & FLAG_ENFORCING))
         return 0;
 
     /* KILL: BPF from inside a sandbox is an unambiguous attack. */
-    request_kill(ctx, cgid, EVT_KIND_POLICY_DENY);
+    request_kill(sctx, cgid, EVT_KIND_POLICY_DENY);
     return -EPERM;
 }
 
@@ -85,13 +85,13 @@ int BPF_PROG(aivisor_kernel_load_data, enum kernel_load_data_id id, bool content
         return ret;
 
     __u64 cgid = bpf_get_current_cgroup_id();
-    struct sandbox_ctx *ctx = bpf_map_lookup_elem(&sandboxes, &cgid);
-    if (!ctx)
+    struct sandbox_ctx *sctx = bpf_map_lookup_elem(&sandboxes, &cgid);
+    if (!sctx)
         return 0;
-    if (!(ctx->flags & FLAG_ENFORCING))
+    if (!(sctx->flags & FLAG_ENFORCING))
         return 0;
 
-    request_kill(ctx, cgid, EVT_KIND_POLICY_DENY);
+    request_kill(sctx, cgid, EVT_KIND_POLICY_DENY);
     return -EPERM;
 }
 
@@ -102,12 +102,12 @@ int BPF_PROG(aivisor_kernel_module_request, const char *fmt, int ret)
         return ret;
 
     __u64 cgid = bpf_get_current_cgroup_id();
-    struct sandbox_ctx *ctx = bpf_map_lookup_elem(&sandboxes, &cgid);
-    if (!ctx)
+    struct sandbox_ctx *sctx = bpf_map_lookup_elem(&sandboxes, &cgid);
+    if (!sctx)
         return 0;
-    if (!(ctx->flags & FLAG_ENFORCING))
+    if (!(sctx->flags & FLAG_ENFORCING))
         return 0;
 
-    request_kill(ctx, cgid, EVT_KIND_POLICY_DENY);
+    request_kill(sctx, cgid, EVT_KIND_POLICY_DENY);
     return -EPERM;
 }

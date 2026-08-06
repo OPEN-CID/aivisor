@@ -2,7 +2,7 @@ use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 
 use aivisor_core::Error;
-use libbpf_rs::{Link, Object, ObjectBuilder, ProgramType};
+use libbpf_rs::{Link, MapCore, Object, ObjectBuilder, ProgramType};
 
 const PIN_DIR: &str = "/sys/fs/bpf/aivisor";
 
@@ -58,7 +58,7 @@ impl BpfLoader {
                 .load()
                 .map_err(|e| Error::LaunchFailed(format!("load BPF object {name}: {e}")))?;
 
-            for mut prog in obj.progs_mut() {
+            for prog in obj.progs_mut() {
                 match prog.prog_type() {
                     ProgramType::CgroupSockAddr => {
                         // Deferred: attached per-sandbox-cgroup by the
@@ -168,10 +168,8 @@ impl Drop for CgroupProgAttachment {
     }
 }
 
-pub const CGROUP_INET4_CONNECT: libbpf_sys::bpf_attach_type =
-    libbpf_sys::BPF_CGROUP_INET4_CONNECT;
-pub const CGROUP_INET6_CONNECT: libbpf_sys::bpf_attach_type =
-    libbpf_sys::BPF_CGROUP_INET6_CONNECT;
+pub const CGROUP_INET4_CONNECT: libbpf_sys::bpf_attach_type = libbpf_sys::BPF_CGROUP_INET4_CONNECT;
+pub const CGROUP_INET6_CONNECT: libbpf_sys::bpf_attach_type = libbpf_sys::BPF_CGROUP_INET6_CONNECT;
 
 /// Attach a pinned cgroup_sock_addr program (by its pin path under
 /// PIN_DIR) to a specific sandbox's cgroup. Called once per sandbox at
@@ -189,9 +187,8 @@ pub fn attach_cgroup_program(
         Error::LaunchFailed(format!("open pinned program {}: {e}", pin_path.display()))
     })?;
 
-    let ret = unsafe {
-        libbpf_sys::bpf_prog_attach(prog_fd.as_raw_fd(), cgroup_fd, attach_type, 0)
-    };
+    let ret =
+        unsafe { libbpf_sys::bpf_prog_attach(prog_fd.as_raw_fd(), cgroup_fd, attach_type, 0) };
     if ret != 0 {
         return Err(Error::LaunchFailed(format!(
             "bpf_prog_attach {program_name}: {}",

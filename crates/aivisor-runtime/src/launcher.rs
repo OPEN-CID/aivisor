@@ -131,8 +131,8 @@ impl Launcher {
         cmd: &str,
         args: &[String],
     ) -> Result<Supervisor, Error> {
-        let (parent_end, child_end) = UnixStream::pair()
-            .map_err(|e| Error::LaunchFailed(format!("sync socketpair: {e}")))?;
+        let (parent_end, child_end) =
+            UnixStream::pair().map_err(|e| Error::LaunchFailed(format!("sync socketpair: {e}")))?;
 
         // Reserve a fresh uid/gid range for this sandbox's user namespace.
         let uid_base = self
@@ -185,7 +185,11 @@ impl Launcher {
                 &mut child_end,
                 rootfs,
                 &rootfs_merged,
-                &spec.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>(),
+                &spec
+                    .env
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<Vec<_>>(),
                 cmd,
                 args,
                 policy,
@@ -284,14 +288,40 @@ impl Launcher {
         caps::set_no_new_privs().map_err(|e| e.to_string())?;
 
         // Step 10: mount setup + pivot_root. Every mount below is built
-        // under `rootfs.merged` (the new root's tree) WHILE STILL IN THE
-        // HOST MOUNT NAMESPACE, then the whole tree is pivoted into in one
-        // move. This is deliberate: the /dev node binds need host source
-        // paths (/dev/null etc.), which are only reachable before
-        // pivot_root discards the old root — doing device setup after
-        // pivoting would bind the sandbox's own empty placeholder files
-        // onto themselves instead of the real host devices.
+        // under `rootfs.merged` (the new root's tree), then the whole tree
+        // is pivoted into in one move. This is deliberate: the /dev node
+        // binds need host source paths (/dev/null etc.), which are only
+        // reachable before pivot_root discards the old root — doing device
+        // setup after pivoting would bind the sandbox's own empty
+        // placeholder files onto themselves instead of the real host
+        // devices.
         remount_root_private()?;
+        // TODO(phase2): this mount(2) call fails closed with EPERM on a
+        // real kernel (verified: Ubuntu 24.04, 6.8.0) whenever
+        // rootfs.lower/upper/work are real host filesystems (they are —
+        // /var/lib/aivisor/templates/* and /run/aivisor/sandboxes/*) and
+        // this process is inside a CLONE_NEWUSER namespace with a
+        // non-identity uid_map (it is, by design — see write_userns_maps).
+        // Root cause, empirically isolated with a minimal clone3+uid_map+
+        // mount(2) reproduction outside this codebase: the kernel's
+        // overlayfs either hard-fails ("upper fs does not support
+        // tmpfile") or silently degrades to a READ-ONLY mount depending on
+        // upperdir/workdir ownership — no ownership (root, uid_base,
+        // uid_base+SANDBOX_UID, or an unrelated uid) produces a mount
+        // that's both accepted AND genuinely writable, because at this
+        // point in the sequence the child is still in-namespace uid 0 but
+        // the underlying directories were created by the PARENT, in the
+        // init namespace, before this sandbox's user namespace existed.
+        // The correct fix is architectural, not a chown: `mount_overlay()`
+        // needs to run in the PARENT (true, unmapped root), before
+        // clone3() — CLONE_NEWNS's mount namespace is a copy-on-write
+        // snapshot taken AT CLONE TIME, so a mount already present in the
+        // parent's tree at that moment is inherited into the child fully
+        // read-write, with no cross-namespace capability question at all.
+        // That requires restructuring Launcher::spawn() to mount before
+        // forking and lazily detach (MNT_DETACH) its own view afterward,
+        // which touches the exact ordering CLAUDE.md's launch-sequence
+        // rules govern — not a change to make without dedicated review.
         rootfs.mount_overlay().map_err(|e| e.to_string())?;
         mount_proc(&rootfs.merged)?;
         mount_sys(&rootfs.merged)?;
@@ -337,9 +367,7 @@ impl Launcher {
 
         let mut envp_c: Vec<CString> = Vec::with_capacity(env.len());
         for (k, v) in env {
-            envp_c.push(
-                CString::new(format!("{k}={v}")).map_err(|e| format!("CString env: {e}"))?,
-            );
+            envp_c.push(CString::new(format!("{k}={v}")).map_err(|e| format!("CString env: {e}"))?);
         }
         let mut envp: Vec<*const libc::c_char> = envp_c.iter().map(|c| c.as_ptr()).collect();
         envp.push(std::ptr::null());
@@ -390,13 +418,8 @@ impl Launcher {
         }
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         let pid_str = pid.as_raw().to_string();
-        let ret = unsafe {
-            libc::write(
-                fd.as_raw_fd(),
-                pid_str.as_ptr() as *const _,
-                pid_str.len(),
-            )
-        };
+        let ret =
+            unsafe { libc::write(fd.as_raw_fd(), pid_str.as_ptr() as *const _, pid_str.len()) };
         if ret < 0 {
             return Err(Error::CgroupSetup(format!(
                 "write cgroup.procs: {}",
@@ -420,8 +443,7 @@ fn kill_via_pidfd(pidfd: RawFd) {
 }
 
 fn send_msg(sock: &mut UnixStream, msg: &ChildMsg) -> std::io::Result<()> {
-    let bytes = serde_json::to_vec(msg)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let bytes = serde_json::to_vec(msg).map_err(std::io::Error::other)?;
     let len = (bytes.len() as u32).to_le_bytes();
     sock.write_all(&len)?;
     sock.write_all(&bytes)
@@ -540,8 +562,7 @@ fn mount_sys(merged: &std::path::Path) -> Result<(), String> {
             fstype.as_ptr(),
             target.as_ptr(),
             fstype.as_ptr(),
-            (libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC)
-                as libc::c_ulong,
+            (libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC) as libc::c_ulong,
             std::ptr::null(),
         )
     };
@@ -590,7 +611,10 @@ fn mount_dev(merged: &std::path::Path) -> Result<(), String> {
         )
     };
     if ret != 0 {
-        return Err(format!("mount dev (tmpfs): {}", std::io::Error::last_os_error()));
+        return Err(format!(
+            "mount dev (tmpfs): {}",
+            std::io::Error::last_os_error()
+        ));
     }
 
     // Minimal device node subset (blueprint §7): null, zero, full, random,
@@ -619,7 +643,10 @@ fn mount_dev(merged: &std::path::Path) -> Result<(), String> {
         )
     };
     if ret != 0 {
-        return Err(format!("mount dev/pts: {}", std::io::Error::last_os_error()));
+        return Err(format!(
+            "mount dev/pts: {}",
+            std::io::Error::last_os_error()
+        ));
     }
 
     let ptmx_path = dev_path.join("ptmx");
@@ -636,7 +663,10 @@ fn mount_dev(merged: &std::path::Path) -> Result<(), String> {
         )
     };
     if ret != 0 {
-        return Err(format!("bind dev/ptmx: {}", std::io::Error::last_os_error()));
+        return Err(format!(
+            "bind dev/ptmx: {}",
+            std::io::Error::last_os_error()
+        ));
     }
 
     Ok(())
@@ -647,8 +677,8 @@ fn bind_host_dev(name: &str, dest: &std::path::Path) -> Result<(), String> {
     // mount namespace (before pivot_root). Doing this bind after pivoting
     // would resolve "/dev/<name>" against the sandbox's own empty
     // placeholder instead of the real device.
-    let src = path_cstring(std::path::Path::new(&format!("/dev/{name}")))
-        .map_err(|e| e.to_string())?;
+    let src =
+        path_cstring(std::path::Path::new(&format!("/dev/{name}"))).map_err(|e| e.to_string())?;
     let dst = path_cstring(dest).map_err(|e| e.to_string())?;
     let ret = unsafe {
         abi::mount(

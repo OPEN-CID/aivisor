@@ -53,6 +53,93 @@ jobs:
       - name: cargo test --workspace
         run: cargo test --workspace
 
+      # The privileged-tests feature gates real integration tests (namespace,
+      # cgroup, landlock, seccomp, escape-suite) that only the self-hosted
+      # privileged-tests job below can execute. A hosted runner can still
+      # compile and lint that code on every PR, which is the only way to
+      # catch it rotting between the rare privileged runs: without this, a
+      # break in code that's behind `#[cfg(feature = "privileged-tests")]`
+      # would go undetected by every job that actually runs green here.
+      - name: cargo build --workspace --features privileged-tests (compile-only)
+        run: cargo build --workspace --all-targets --features privileged-tests
+
+      - name: cargo clippy --workspace --features privileged-tests (compile-only)
+        run: cargo clippy --workspace --all-targets --features privileged-tests -- -D warnings
+
+  sdk-typescript:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/typescript
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+
+      - name: npm ci
+        run: npm ci
+
+      - name: typecheck
+        run: npm run typecheck
+
+      - name: build
+        run: npm run build
+
+      - name: test
+        run: npm test
+
+  sdk-python:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: install build deps
+        run: python -m pip install --upgrade pip build
+
+      - name: build wheel
+        run: python -m build
+
+      - name: run tests
+        run: python -m unittest discover -s tests -v
+
+  k8s-controller:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: k8s/controller
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: gofmt --check
+        run: |
+          fmt_out="$(gofmt -l .)"
+          if [ -n "$fmt_out" ]; then
+            echo "$fmt_out"
+            echo "run gofmt -w on the files above"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
   # Requires a self-hosted runner: root, cgroup v2 with the aivisor
   # controllers delegatable, and a kernel booted with
   # lsm=...,landlock,bpf and CONFIG_BPF_LSM=y (blueprint.md §11.5). Do not

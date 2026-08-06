@@ -2,21 +2,29 @@
   "name": "@aivisor/sdk",
   "version": "0.1.0",
   "description": "AIVisor TypeScript SDK",
+  "type": "module",
   "main": "dist/index.js",
-  "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.js"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18"
   },
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {},
   "devDependencies": {
+    "@types/node": "^20.14",
     "typescript": "^5.4",
     "vitest": "^1.6"
   }

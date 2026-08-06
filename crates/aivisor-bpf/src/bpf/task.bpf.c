@@ -21,8 +21,8 @@ int BPF_PROG(aivisor_task_alloc, struct task_struct *task, unsigned long clone_f
         return ret;
 
     __u64 cgid = bpf_get_current_cgroup_id();
-    struct sandbox_ctx *ctx = bpf_map_lookup_elem(&sandboxes, &cgid);
-    if (!ctx)
+    struct sandbox_ctx *sctx = bpf_map_lookup_elem(&sandboxes, &cgid);
+    if (!sctx)
         return 0;
 
     /* Mark turn dirty when a new process survives (fork). In-place through
@@ -32,7 +32,7 @@ int BPF_PROG(aivisor_task_alloc, struct task_struct *task, unsigned long clone_f
      * sandbox_ctx, corrupting every other field — sandbox_seq,
      * policy_gen, all three rule ranges, turn_id — with whatever else
      * happened to be on the stack). */
-    ctx->flags |= FLAG_DIRTY;
+    sctx->flags |= FLAG_DIRTY;
 
     return 0;
 }

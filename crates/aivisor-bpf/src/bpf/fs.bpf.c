@@ -81,10 +81,10 @@ int BPF_PROG(aivisor_file_open, struct file *file, int ret)
         return ret;
 
     __u64 cgid = bpf_get_current_cgroup_id();
-    struct sandbox_ctx *ctx = bpf_map_lookup_elem(&sandboxes, &cgid);
-    if (!ctx)
+    struct sandbox_ctx *sctx = bpf_map_lookup_elem(&sandboxes, &cgid);
+    if (!sctx)
         return 0;  /* NOT a sandbox — do not touch the host */
-    if (!(ctx->flags & FLAG_ENFORCING))
+    if (!(sctx->flags & FLAG_ENFORCING))
         return 0;  /* audit-only mode */
 
     char path_buf[256];
@@ -110,8 +110,8 @@ int BPF_PROG(aivisor_file_open, struct file *file, int ret)
         .matched_denied = 0,
     };
 
-    __u32 idx = ctx->fs_rules_base;
-    __u32 end = ctx->fs_rules_base + ctx->fs_rules_count;
+    __u32 idx = sctx->fs_rules_base;
+    __u32 end = sctx->fs_rules_base + sctx->fs_rules_count;
 #pragma unroll
     for (int i = 0; i < MAX_RULES_PER_SANDBOX; i++) {
         if (idx + i >= end)
@@ -139,13 +139,13 @@ int BPF_PROG(aivisor_path_mkdir, const struct path *dir, struct dentry *dentry, 
         return ret;
 
     __u64 cgid = bpf_get_current_cgroup_id();
-    struct sandbox_ctx *ctx = bpf_map_lookup_elem(&sandboxes, &cgid);
-    if (!ctx)
+    struct sandbox_ctx *sctx = bpf_map_lookup_elem(&sandboxes, &cgid);
+    if (!sctx)
         return 0;
 
     /* In-place bit-set through the map pointer — never overwrite the
      * whole struct with a differently-typed local (see common.h header). */
-    ctx->flags |= FLAG_DIRTY;
+    sctx->flags |= FLAG_DIRTY;
 
     return 0;
 }
@@ -158,11 +158,11 @@ int BPF_PROG(aivisor_path_unlink, const struct path *dir, struct dentry *dentry,
         return ret;
 
     __u64 cgid = bpf_get_current_cgroup_id();
-    struct sandbox_ctx *ctx = bpf_map_lookup_elem(&sandboxes, &cgid);
-    if (!ctx)
+    struct sandbox_ctx *sctx = bpf_map_lookup_elem(&sandboxes, &cgid);
+    if (!sctx)
         return 0;
 
-    ctx->flags |= FLAG_DIRTY;
+    sctx->flags |= FLAG_DIRTY;
 
     return 0;
 }
@@ -176,11 +176,11 @@ int BPF_PROG(aivisor_path_rename, const struct path *old_dir, struct dentry *old
         return ret;
 
     __u64 cgid = bpf_get_current_cgroup_id();
-    struct sandbox_ctx *ctx = bpf_map_lookup_elem(&sandboxes, &cgid);
-    if (!ctx)
+    struct sandbox_ctx *sctx = bpf_map_lookup_elem(&sandboxes, &cgid);
+    if (!sctx)
         return 0;
 
-    ctx->flags |= FLAG_DIRTY;
+    sctx->flags |= FLAG_DIRTY;
 
     return 0;
 }
@@ -193,11 +193,11 @@ int BPF_PROG(aivisor_path_truncate, const struct path *path, int ret)
         return ret;
 
     __u64 cgid = bpf_get_current_cgroup_id();
-    struct sandbox_ctx *ctx = bpf_map_lookup_elem(&sandboxes, &cgid);
-    if (!ctx)
+    struct sandbox_ctx *sctx = bpf_map_lookup_elem(&sandboxes, &cgid);
+    if (!sctx)
         return 0;
 
-    ctx->flags |= FLAG_DIRTY;
+    sctx->flags |= FLAG_DIRTY;
 
     return 0;
 }

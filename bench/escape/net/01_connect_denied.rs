@@ -15,9 +15,8 @@ fn main() {
             None => Outcome::Unverified("could not resolve 1.1.1.1:80".into())
                 .print_and_exit("connect to denied IP"),
         },
-        Err(e) => {
-            Outcome::Unverified(format!("address parse failed: {e}")).print_and_exit("connect to denied IP")
-        }
+        Err(e) => Outcome::Unverified(format!("address parse failed: {e}"))
+            .print_and_exit("connect to denied IP"),
     };
 
     match TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2)) {

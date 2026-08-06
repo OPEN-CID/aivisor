@@ -1,6 +1,10 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+# setuptools.build_meta is the backend setuptools actually exposes. The
+# previous value ("setuptools.backends._legacy:_Backend") is not an importable
+# module path in any setuptools release, so `pip install .` / `python -m build`
+# failed with BackendUnavailable before reaching a single line of this package.
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "aivisor"
@@ -11,4 +15,10 @@ license = { text = "MIT" }
 dependencies = []
 
 [project.urls]
-Home = "https://github.com/anomalyco/aivisor"
+Homepage = "https://github.com/OPEN-CID/aivisor"
+
+# Explicit over auto-discovery: this directory holds one importable package
+# and a pyproject.toml, and flat-layout auto-discovery would otherwise start
+# guessing if a tests/ or build/ directory is ever added beside it.
+[tool.setuptools.packages.find]
+include = ["aivisor*"]

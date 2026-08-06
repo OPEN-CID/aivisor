@@ -1,12 +1,11 @@
 use std::fs;
 use std::io;
 use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::io::{AsRawFd, OwnedFd};
+use std::os::unix::io::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use aivisor_core::{CgroupId, Error, ResourceLimits, SandboxId};
-use rustix::fs::{Mode, OFlags, Stat};
 
 pub struct Cgroup {
     pub path: PathBuf,
@@ -219,9 +218,8 @@ fn delegate_controllers(cgroup_root: &Path) -> Result<(), Error> {
     // delegate any of them must fail closed rather than silently produce
     // an unconfined sandbox.
     for ctrl in ["+cpu", "+memory", "+pids"] {
-        fs::write(&subtree_path, ctrl).map_err(|e| {
-            Error::CgroupSetup(format!("delegate controller {ctrl}: {e}"))
-        })?;
+        fs::write(&subtree_path, ctrl)
+            .map_err(|e| Error::CgroupSetup(format!("delegate controller {ctrl}: {e}")))?;
     }
     let _ = fs::write(&subtree_path, "+io");
     Ok(())
@@ -250,7 +248,6 @@ fn wait_for_empty(populated_path: &Path, timeout: Duration) -> Result<(), Error>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsStr;
 
     #[test]
     fn test_cgroup_id_from_stat() {

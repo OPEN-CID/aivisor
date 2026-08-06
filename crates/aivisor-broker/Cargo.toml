@@ -10,8 +10,14 @@ tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-reqwest = { version = "0.12", features = ["rustls-tls"] }
 uuid = { workspace = true }
+# NOTE: no HTTP client dependency here on purpose. The terminating egress
+# proxy (proxy.rs `serve()`) is TODO(phase3) and nothing in this crate makes
+# outbound requests yet. The previous `reqwest` entry was unused, and with
+# default features on it pulled `native-tls`/`openssl-sys` into the daemon's
+# link closure — an OpenSSL dependency a security runtime should not acquire
+# by accident. Add the client back, `default-features = false` with an
+# explicitly chosen TLS backend, when phase 3 actually needs one.
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

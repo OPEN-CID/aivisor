@@ -14,9 +14,25 @@
 //!
 //! Requires: `--features privileged-tests` on a Linux host with root/
 //! capabilities, and a real base image at `/var/lib/aivisor/templates/base`
-//! (images/base/build.sh is currently a stub — see that file's own TODO).
-//! Until a real base image exists, these tests fail at `manager.create()`
-//! or the `exec()` overlay mount, not because confinement is broken.
+//! (see images/base/build.sh).
+//!
+//! As of this writing these three tests fail — not because confinement is
+//! broken, but because `exec()`'s overlay mount itself fails first. Root
+//! cause (empirically verified against a real kernel, Ubuntu 24.04/6.8.0):
+//! mounting overlayfs from inside the sandbox's CLONE_NEWUSER namespace,
+//! with lower/upper/work all real host filesystems, either hard-fails
+//! ("upper fs does not support tmpfile") or silently degrades to a
+//! READ-ONLY mount depending on upperdir/workdir ownership — no ownership
+//! choice produces a mount that's both accepted and genuinely writable.
+//! See the `TODO(phase2)` at `launcher.rs`'s `rootfs.mount_overlay()` call
+//! site for the full analysis and the architectural fix (mount in the
+//! parent, before clone3(), so CLONE_NEWNS's snapshot inherits it already
+//! read-write) — this is a namespace-sequencing change to the exact code
+//! CLAUDE.md's launch-sequence rules govern, not a one-line patch.
+//!
+//! Without the feature this file compiles to nothing — deliberately, rather
+//! than to a test that prints "skipping" and reports green, which would make
+//! an un-run gate look like a passing one in the CI summary.
 
 #[cfg(feature = "privileged-tests")]
 mod hostile_tests {
@@ -68,7 +84,10 @@ mod hostile_tests {
             .arg(&bin_path)
             .status()
             .expect("invoke rustc to build the in-sandbox check program");
-        assert!(status.success(), "rustc failed to compile the check program");
+        assert!(
+            status.success(),
+            "rustc failed to compile the check program"
+        );
 
         manager
             .exec(id, "/workspace/check", &[])
@@ -95,7 +114,10 @@ mod hostile_tests {
         );
 
         let _ = manager.destroy(&id);
-        assert_eq!(code, 0, "expected /etc/shadow read to be denied (EPERM/EACCES)");
+        assert_eq!(
+            code, 0,
+            "expected /etc/shadow read to be denied (EPERM/EACCES)"
+        );
     }
 
     #[test]
@@ -130,7 +152,10 @@ mod hostile_tests {
         );
 
         let _ = manager.destroy(&id);
-        assert_eq!(code, 0, "expected mount() inside the sandbox to be denied (EPERM/EACCES)");
+        assert_eq!(
+            code, 0,
+            "expected mount() inside the sandbox to be denied (EPERM/EACCES)"
+        );
     }
 
     #[test]
@@ -149,12 +174,11 @@ mod hostile_tests {
             &id,
             r#"
             fn main() {
-                // Re-exec ourselves as a child to prove the denial is
-                // inherited, not just true for the directly-exec'd process.
-                let exe = std::env::current_exe().unwrap();
-                let status = std::process::Command::new(exe)
-                    .env("HOSTILE_CHILD", "1")
-                    .status();
+                // The child branch MUST be tested before spawning anything:
+                // checking it afterwards makes every generation spawn the
+                // next one first, which is an unbounded fork bomb inside a
+                // sandbox whose pids.max we are also relying on. Ask "am I
+                // the child?" first, do the denied read, and exit.
                 if std::env::var("HOSTILE_CHILD").is_ok() {
                     match std::fs::read_to_string("/etc/shadow") {
                         Ok(_) => std::process::exit(1),
@@ -162,7 +186,15 @@ mod hostile_tests {
                         Err(_) => std::process::exit(2),
                     }
                 }
-                match status {
+
+                // Parent: re-exec ourselves as a child to prove the denial is
+                // inherited, not just true for the directly-exec'd process,
+                // and propagate the child's verdict as our own.
+                let exe = match std::env::current_exe() {
+                    Ok(e) => e,
+                    Err(_) => std::process::exit(2),
+                };
+                match std::process::Command::new(exe).env("HOSTILE_CHILD", "1").status() {
                     Ok(s) => std::process::exit(s.code().unwrap_or(2)),
                     Err(_) => std::process::exit(2),
                 }
@@ -176,10 +208,4 @@ mod hostile_tests {
             "expected Landlock denial to be inherited by a child process, not just the top-level exec"
         );
     }
-}
-
-#[cfg(not(feature = "privileged-tests"))]
-#[test]
-fn test_hostile_placeholder() {
-    eprintln!("Skipping hostile tests: requires --features privileged-tests on Linux");
 }
