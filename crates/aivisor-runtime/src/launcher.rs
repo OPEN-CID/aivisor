@@ -288,14 +288,40 @@ impl Launcher {
         caps::set_no_new_privs().map_err(|e| e.to_string())?;
 
         // Step 10: mount setup + pivot_root. Every mount below is built
-        // under `rootfs.merged` (the new root's tree) WHILE STILL IN THE
-        // HOST MOUNT NAMESPACE, then the whole tree is pivoted into in one
-        // move. This is deliberate: the /dev node binds need host source
-        // paths (/dev/null etc.), which are only reachable before
-        // pivot_root discards the old root — doing device setup after
-        // pivoting would bind the sandbox's own empty placeholder files
-        // onto themselves instead of the real host devices.
+        // under `rootfs.merged` (the new root's tree), then the whole tree
+        // is pivoted into in one move. This is deliberate: the /dev node
+        // binds need host source paths (/dev/null etc.), which are only
+        // reachable before pivot_root discards the old root — doing device
+        // setup after pivoting would bind the sandbox's own empty
+        // placeholder files onto themselves instead of the real host
+        // devices.
         remount_root_private()?;
+        // TODO(phase2): this mount(2) call fails closed with EPERM on a
+        // real kernel (verified: Ubuntu 24.04, 6.8.0) whenever
+        // rootfs.lower/upper/work are real host filesystems (they are —
+        // /var/lib/aivisor/templates/* and /run/aivisor/sandboxes/*) and
+        // this process is inside a CLONE_NEWUSER namespace with a
+        // non-identity uid_map (it is, by design — see write_userns_maps).
+        // Root cause, empirically isolated with a minimal clone3+uid_map+
+        // mount(2) reproduction outside this codebase: the kernel's
+        // overlayfs either hard-fails ("upper fs does not support
+        // tmpfile") or silently degrades to a READ-ONLY mount depending on
+        // upperdir/workdir ownership — no ownership (root, uid_base,
+        // uid_base+SANDBOX_UID, or an unrelated uid) produces a mount
+        // that's both accepted AND genuinely writable, because at this
+        // point in the sequence the child is still in-namespace uid 0 but
+        // the underlying directories were created by the PARENT, in the
+        // init namespace, before this sandbox's user namespace existed.
+        // The correct fix is architectural, not a chown: `mount_overlay()`
+        // needs to run in the PARENT (true, unmapped root), before
+        // clone3() — CLONE_NEWNS's mount namespace is a copy-on-write
+        // snapshot taken AT CLONE TIME, so a mount already present in the
+        // parent's tree at that moment is inherited into the child fully
+        // read-write, with no cross-namespace capability question at all.
+        // That requires restructuring Launcher::spawn() to mount before
+        // forking and lazily detach (MNT_DETACH) its own view afterward,
+        // which touches the exact ordering CLAUDE.md's launch-sequence
+        // rules govern — not a change to make without dedicated review.
         rootfs.mount_overlay().map_err(|e| e.to_string())?;
         mount_proc(&rootfs.merged)?;
         mount_sys(&rootfs.merged)?;

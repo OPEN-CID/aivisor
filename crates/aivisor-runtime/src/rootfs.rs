@@ -108,11 +108,17 @@ mod tests {
 
     #[test]
     fn test_rootfs_prepare_paths() {
-        let tmp = std::env::temp_dir().join(format!("aivisor-rootfs-test-{}", std::process::id()));
+        // Unique per run (PID + UUID, not a fixed literal): a fixed sandbox
+        // id would make `Rootfs::prepare`'s `create_dir` (non-recursive,
+        // EEXIST on a repeat) fail on any second run within the same boot,
+        // since /run/aivisor/sandboxes/<id> is never otherwise cleaned up
+        // between separate test invocations.
+        let sandbox_id = format!("test-{}-{}", std::process::id(), uuid::Uuid::now_v7());
+        let tmp = std::env::temp_dir().join(format!("aivisor-rootfs-test-{sandbox_id}"));
         let _ = fs::create_dir_all(&tmp);
 
         let spec = WorkspaceSpec::Tmpfs { size: 1073741824 };
-        let rootfs = Rootfs::prepare(&tmp, &spec, "test-123").unwrap();
+        let rootfs = Rootfs::prepare(&tmp, &spec, &sandbox_id).unwrap();
         assert!(rootfs.merged.exists());
         assert!(rootfs.upper.exists());
         assert!(rootfs.work.exists());
@@ -124,5 +130,6 @@ mod tests {
         assert_ne!(rootfs.lower, rootfs.merged);
 
         let _ = fs::remove_dir_all(&tmp);
+        let _ = fs::remove_dir_all(format!("/run/aivisor/sandboxes/{sandbox_id}"));
     }
 }

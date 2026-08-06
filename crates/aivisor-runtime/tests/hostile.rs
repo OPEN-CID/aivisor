@@ -14,9 +14,21 @@
 //!
 //! Requires: `--features privileged-tests` on a Linux host with root/
 //! capabilities, and a real base image at `/var/lib/aivisor/templates/base`
-//! (images/base/build.sh is currently a stub — see that file's own TODO).
-//! Until a real base image exists, these tests fail at `manager.create()`
-//! or the `exec()` overlay mount, not because confinement is broken.
+//! (see images/base/build.sh).
+//!
+//! As of this writing these three tests fail — not because confinement is
+//! broken, but because `exec()`'s overlay mount itself fails first. Root
+//! cause (empirically verified against a real kernel, Ubuntu 24.04/6.8.0):
+//! mounting overlayfs from inside the sandbox's CLONE_NEWUSER namespace,
+//! with lower/upper/work all real host filesystems, either hard-fails
+//! ("upper fs does not support tmpfile") or silently degrades to a
+//! READ-ONLY mount depending on upperdir/workdir ownership — no ownership
+//! choice produces a mount that's both accepted and genuinely writable.
+//! See the `TODO(phase2)` at `launcher.rs`'s `rootfs.mount_overlay()` call
+//! site for the full analysis and the architectural fix (mount in the
+//! parent, before clone3(), so CLONE_NEWNS's snapshot inherits it already
+//! read-write) — this is a namespace-sequencing change to the exact code
+//! CLAUDE.md's launch-sequence rules govern, not a one-line patch.
 //!
 //! Without the feature this file compiles to nothing — deliberately, rather
 //! than to a test that prints "skipping" and reports green, which would make
