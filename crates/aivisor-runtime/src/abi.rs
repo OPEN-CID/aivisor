@@ -142,7 +142,7 @@ pub const CLONE_NEWUSER: u64 = 0x1000_0000;
 pub const CLONE_NEWPID: u64 = 0x2000_0000;
 pub const CLONE_NEWNET: u64 = 0x4000_0000;
 pub const CLONE_PIDFD: u64 = 0x0000_1000;
-pub const CLONE_INTO_CGROUP: u64 = 0x2000_0000_0000;
+pub const CLONE_INTO_CGROUP: u64 = 0x0000_0002_0000_0000;
 
 /// `struct clone_args`, CLONE_ARGS_SIZE_VER2 (88 bytes) — the version that
 /// added the trailing `cgroup` field (kernel 5.7+, `CLONE_INTO_CGROUP`).

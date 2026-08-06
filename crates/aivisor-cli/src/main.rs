@@ -224,8 +224,9 @@ fn cmd_run(
     }
 
     if let Some(ref mem_str) = memory {
-        limits.memory_max = Some(parse_size(mem_str).map_err(|e| anyhow::anyhow!(e))?);
-        limits.memory_high = Some(limits.memory_max.unwrap() * 9 / 10);
+        let mem_max = parse_size(mem_str).map_err(|e| anyhow::anyhow!(e))?;
+        limits.memory_max = Some(mem_max);
+        limits.memory_high = Some(mem_max * 9 / 10);
     }
 
     if let Some(p) = pids {

@@ -76,10 +76,10 @@ int BPF_PROG(aivisor_socket_connect, struct socket *sock, struct sockaddr *addre
         return ret;
 
     __u64 cgid = bpf_get_current_cgroup_id();
-    struct sandbox_ctx *ctx = bpf_map_lookup_elem(&sandboxes, &cgid);
-    if (!ctx)
+    struct sandbox_ctx *sctx = bpf_map_lookup_elem(&sandboxes, &cgid);
+    if (!sctx)
         return 0;
-    if (!(ctx->flags & FLAG_ENFORCING))
+    if (!(sctx->flags & FLAG_ENFORCING))
         return 0;
 
     if (!address)
@@ -95,7 +95,7 @@ int BPF_PROG(aivisor_socket_connect, struct socket *sock, struct sockaddr *addre
         bpf_probe_read_kernel(&sin_addr, sizeof(sin_addr), &addr4->sin_addr);
         bpf_probe_read_kernel(&sin_port, sizeof(sin_port), &addr4->sin_port);
 
-        int allowed = check_ipv4_dst(cgid, ctx, sin_addr, bpf_ntohs(sin_port));
+        int allowed = check_ipv4_dst(cgid, sctx, sin_addr, bpf_ntohs(sin_port));
         return allowed ? 0 : -EPERM;
     }
     else if (family == AF_INET6) {
@@ -122,10 +122,10 @@ int BPF_PROG(aivisor_socket_bind, struct socket *sock, struct sockaddr *address,
         return ret;
 
     __u64 cgid = bpf_get_current_cgroup_id();
-    struct sandbox_ctx *ctx = bpf_map_lookup_elem(&sandboxes, &cgid);
-    if (!ctx)
+    struct sandbox_ctx *sctx = bpf_map_lookup_elem(&sandboxes, &cgid);
+    if (!sctx)
         return 0;
-    if (!(ctx->flags & FLAG_ENFORCING))
+    if (!(sctx->flags & FLAG_ENFORCING))
         return 0;
 
     if (!address)

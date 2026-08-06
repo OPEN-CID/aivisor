@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use aivisor_core::{Error, SandboxId, SandboxSpec, SandboxState};
 use aivisor_policy::{AccessDefault, FsPolicy, FsRule, NetPolicy, Policy};
@@ -50,6 +50,19 @@ pub struct SandboxManager {
 }
 
 impl SandboxManager {
+    /// A poisoned mutex means some other thread panicked while mutating the
+    /// registry — the `Inner` it left behind is still the best information
+    /// this process has (there's no external source to recover from), so
+    /// recovering the guard beats letting every subsequent call panic too.
+    /// `.unwrap()` on `lock()` would panic identically on poison anyway;
+    /// this just makes that an explicit, named decision instead of a bare
+    /// unwrap.
+    fn lock_inner(&self) -> MutexGuard<'_, Inner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     pub fn new() -> Result<Self, Error> {
         let caps = probe_all();
         crate::probe::check_hard_requirements(&caps).map_err(|_msg| {
@@ -81,7 +94,7 @@ impl SandboxManager {
     /// is the in-memory registry for the current process's lifetime, which
     /// is what `aivisor-cli`'s `--policy` flag (see aivisor-cli) populates.
     pub fn register_policy(&self, name: String, policy: Policy) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.lock_inner();
         inner.policy_store.insert(name, policy);
     }
 
@@ -131,7 +144,7 @@ impl SandboxManager {
         let template_dir = PathBuf::from(TEMPLATES_DIR).join(&spec.template);
         let rootfs = Rootfs::prepare(&template_dir, &spec.workspace, &id.to_string())?;
 
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.lock_inner();
 
         inner.registry.insert(
             id.to_string(),
@@ -169,7 +182,7 @@ impl SandboxManager {
         // the process against every other one, including unrelated
         // create/list/destroy calls.
         let (spec, cg_fd_owner, rootfs, resolved_policy) = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.lock_inner();
 
             let policy = self.resolve_policy_locked(&inner, id)?;
 
@@ -216,7 +229,7 @@ impl SandboxManager {
         let supervisor = match spawn_result {
             Ok(s) => s,
             Err(e) => {
-                let mut inner = self.inner.lock().unwrap();
+                let mut inner = self.lock_inner();
                 if let Some(handle) = inner.registry.get_mut(&id.to_string()) {
                     handle.state = SandboxState::Ready;
                 }
@@ -226,7 +239,7 @@ impl SandboxManager {
 
         let exit_code = supervisor.wait();
 
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.lock_inner();
         if let Some(handle) = inner.registry.get_mut(&id.to_string()) {
             handle.state = SandboxState::Ready;
         }
@@ -287,7 +300,7 @@ impl SandboxManager {
     }
 
     pub fn pause(&self, id: &SandboxId) -> Result<(), Error> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.lock_inner();
         let handle = inner
             .registry
             .get_mut(&id.to_string())
@@ -301,7 +314,7 @@ impl SandboxManager {
     }
 
     pub fn resume(&self, id: &SandboxId) -> Result<(), Error> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.lock_inner();
         let handle = inner
             .registry
             .get_mut(&id.to_string())
@@ -324,7 +337,7 @@ impl SandboxManager {
     /// function's ordering already reserves the "last" slot for it.
     pub fn destroy(&self, id: &SandboxId) -> Result<(), Error> {
         let removed = {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.lock_inner();
             inner.registry.remove(&id.to_string())
         };
 
@@ -364,7 +377,7 @@ impl SandboxManager {
     /// layout. Used by `bench/escape`'s harness to place a compiled
     /// scenario binary somewhere the sandbox can execute it from.
     pub fn workspace_upper_dir(&self, id: &SandboxId) -> Result<PathBuf, Error> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.lock_inner();
         let handle = inner
             .registry
             .get(&id.to_string())
@@ -377,7 +390,7 @@ impl SandboxManager {
     }
 
     pub fn list(&self) -> Vec<SandboxSummary> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.lock_inner();
         inner
             .registry
             .values()

@@ -26,10 +26,10 @@ int BPF_PROG(aivisor_bprm_check_security, struct linux_binprm *bprm, int ret)
         return ret;
 
     __u64 cgid = bpf_get_current_cgroup_id();
-    struct sandbox_ctx *ctx = bpf_map_lookup_elem(&sandboxes, &cgid);
-    if (!ctx)
+    struct sandbox_ctx *sctx = bpf_map_lookup_elem(&sandboxes, &cgid);
+    if (!sctx)
         return 0;
-    if (!(ctx->flags & FLAG_ENFORCING))
+    if (!(sctx->flags & FLAG_ENFORCING))
         return 0;
 
     /* Get the file's inode and device. */
@@ -47,8 +47,8 @@ int BPF_PROG(aivisor_bprm_check_security, struct linux_binprm *bprm, int ret)
     bpf_core_read(&inode_nr, sizeof(inode_nr), &inode->i_ino);
     bpf_core_read(&dev, sizeof(dev), &inode->i_sb->s_dev);
 
-    __u32 base = ctx->exec_rules_base;
-    __u32 end = ctx->exec_rules_base + ctx->exec_rules_count;
+    __u32 base = sctx->exec_rules_base;
+    __u32 end = sctx->exec_rules_base + sctx->exec_rules_count;
     __u32 matched = 0;
 
 #pragma unroll
@@ -72,7 +72,7 @@ int BPF_PROG(aivisor_bprm_check_security, struct linux_binprm *bprm, int ret)
 
     /* Set dirty bit: an exec happened this turn. In-place through the map
      * pointer, not a full-struct overwrite (see common.h header note). */
-    ctx->flags |= FLAG_DIRTY;
+    sctx->flags |= FLAG_DIRTY;
 
     emit_event(cgid, EVT_KIND_EXEC, EVT_DECISION_ALLOW, 0);
     return 0;
