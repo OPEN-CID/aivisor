@@ -168,6 +168,17 @@ impl Launcher {
         // necessary.
         let rootfs_merged = path_cstring(&rootfs.merged)?;
 
+        // upper/work are chowned to this sandbox's own uid_base HERE, in
+        // the parent (real, unmapped root — chown to an arbitrary host
+        // uid is only unambiguous from outside any user namespace), before
+        // clone3(). The child mounts the overlay itself, inside its own
+        // namespace, once it has become namespace-relative root (see
+        // caps::become_namespace_root) — at that point its credential
+        // resolves to exactly this host uid, matching what upper/work are
+        // now owned by. Chowning any later would race the child, which
+        // needs upper/work already correctly owned the moment it mounts.
+        rootfs.chown_upper_and_work(uid_base, uid_base)?;
+
         let ret = unsafe { abi::clone3(&mut clone_args) };
         if ret < 0 {
             return Err(Error::LaunchFailed(format!(
@@ -282,6 +293,14 @@ impl Launcher {
         sync.read_exact(&mut buf)
             .map_err(|e| format!("sync read: {e}"))?;
 
+        // Refresh credentials to namespace-relative root NOW, before
+        // anything below mounts or creates files: this process's
+        // credential otherwise still predates the uid_map just written
+        // above (see caps::become_namespace_root's doc comment) and every
+        // filesystem this process itself mounts from here on (dev, tmp)
+        // would fail file creation with EOVERFLOW.
+        caps::become_namespace_root().map_err(|e| e.to_string())?;
+
         // Step 9: no_new_privs first — before any of the mount work below,
         // matching blueprint §6.2 (it does not block mount/pivot_root,
         // which still run with full namespaced capabilities at this point).
@@ -296,32 +315,18 @@ impl Launcher {
         // placeholder files onto themselves instead of the real host
         // devices.
         remount_root_private()?;
-        // TODO(phase2): this mount(2) call fails closed with EPERM on a
-        // real kernel (verified: Ubuntu 24.04, 6.8.0) whenever
-        // rootfs.lower/upper/work are real host filesystems (they are —
-        // /var/lib/aivisor/templates/* and /run/aivisor/sandboxes/*) and
-        // this process is inside a CLONE_NEWUSER namespace with a
-        // non-identity uid_map (it is, by design — see write_userns_maps).
-        // Root cause, empirically isolated with a minimal clone3+uid_map+
-        // mount(2) reproduction outside this codebase: the kernel's
-        // overlayfs either hard-fails ("upper fs does not support
-        // tmpfile") or silently degrades to a READ-ONLY mount depending on
-        // upperdir/workdir ownership — no ownership (root, uid_base,
-        // uid_base+SANDBOX_UID, or an unrelated uid) produces a mount
-        // that's both accepted AND genuinely writable, because at this
-        // point in the sequence the child is still in-namespace uid 0 but
-        // the underlying directories were created by the PARENT, in the
-        // init namespace, before this sandbox's user namespace existed.
-        // The correct fix is architectural, not a chown: `mount_overlay()`
-        // needs to run in the PARENT (true, unmapped root), before
-        // clone3() — CLONE_NEWNS's mount namespace is a copy-on-write
-        // snapshot taken AT CLONE TIME, so a mount already present in the
-        // parent's tree at that moment is inherited into the child fully
-        // read-write, with no cross-namespace capability question at all.
-        // That requires restructuring Launcher::spawn() to mount before
-        // forking and lazily detach (MNT_DETACH) its own view afterward,
-        // which touches the exact ordering CLAUDE.md's launch-sequence
-        // rules govern — not a change to make without dedicated review.
+        // Mounted here, not by the parent: pivot_root (below) refuses a
+        // mount created outside this process's own user namespace
+        // ("locked", in kernel terms — verified empirically on a real
+        // kernel, Ubuntu 24.08, 6.8.0: pivot_root into a mount the parent
+        // made before clone3() fails EINVAL regardless of propagation
+        // settings, even though the child inherits an independent copy of
+        // it). Mounting it here instead works because, by this point,
+        // become_namespace_root() has already given this process a
+        // credential that resolves correctly within its own namespace —
+        // upper/work (chowned by the parent to this same uid, before
+        // clone3()) are then already owned by exactly the uid this mount
+        // is performed as. See Rootfs::mount_overlay's doc comment.
         rootfs.mount_overlay().map_err(|e| e.to_string())?;
         mount_proc(&rootfs.merged)?;
         mount_sys(&rootfs.merged)?;
@@ -335,8 +340,11 @@ impl Launcher {
             .map_err(|e| format!("mkdir workspace: {e}"))?;
         pivot_into(rootfs_merged_c)?;
 
-        // Step 11: drop capabilities.
-        caps::drop_all_capabilities().map_err(|e| e.to_string())?;
+        // Step 11: drop the capability bounding set + ambient/inheritable.
+        // Deliberately NOT effective/permitted yet — step 14 below still
+        // needs CAP_SETUID/CAP_SETGID to change uid/gid at all. See
+        // caps::drop_bounding_set_and_ambient's doc comment.
+        caps::drop_bounding_set_and_ambient().map_err(|e| e.to_string())?;
 
         // Step 12: Landlock (opens path fds inside the final mount ns).
         landlock::apply_landlock(&policy.landlock).map_err(|e| e.to_string())?;
@@ -345,8 +353,11 @@ impl Launcher {
         // block syscalls (landlock_*, mount, pivot_root) used above it.
         seccomp::apply_seccomp(&policy.seccomp_profile).map_err(|e| e.to_string())?;
 
-        // Step 14: drop to the unprivileged in-namespace uid/gid.
+        // Step 14: drop to the unprivileged in-namespace uid/gid, then
+        // finish dropping capabilities now that the uid/gid change no
+        // longer needs them.
         caps::drop_to_unprivileged(SANDBOX_UID, SANDBOX_GID).map_err(|e| e.to_string())?;
+        caps::finish_dropping_capabilities().map_err(|e| e.to_string())?;
         let _ = uid_base; // documents provenance of SANDBOX_UID's host mapping
 
         // Report readiness LAST, immediately before execve — sending it any

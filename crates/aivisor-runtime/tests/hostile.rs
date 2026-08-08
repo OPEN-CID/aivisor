@@ -16,19 +16,47 @@
 //! capabilities, and a real base image at `/var/lib/aivisor/templates/base`
 //! (see images/base/build.sh).
 //!
-//! As of this writing these three tests fail — not because confinement is
-//! broken, but because `exec()`'s overlay mount itself fails first. Root
-//! cause (empirically verified against a real kernel, Ubuntu 24.04/6.8.0):
-//! mounting overlayfs from inside the sandbox's CLONE_NEWUSER namespace,
-//! with lower/upper/work all real host filesystems, either hard-fails
-//! ("upper fs does not support tmpfile") or silently degrades to a
-//! READ-ONLY mount depending on upperdir/workdir ownership — no ownership
-//! choice produces a mount that's both accepted and genuinely writable.
-//! See the `TODO(phase2)` at `launcher.rs`'s `rootfs.mount_overlay()` call
-//! site for the full analysis and the architectural fix (mount in the
-//! parent, before clone3(), so CLONE_NEWNS's snapshot inherits it already
-//! read-write) — this is a namespace-sequencing change to the exact code
-//! CLAUDE.md's launch-sequence rules govern, not a one-line patch.
+//! All three tests pass end-to-end against a real kernel (verified: Ubuntu
+//! 24.04, 6.8.0) — a genuine sandbox launches, the check program executes
+//! inside it, and confinement is inherited by a re-exec'd child. Getting
+//! here from the previous "overlay mount fails before anything else even
+//! runs" state took several independently-diagnosed, empirically-verified
+//! fixes, in order along the launch sequence:
+//! - `caps::become_namespace_root` (setresuid/setresgid(0,0,0) right after
+//!   the parent writes uid_map/gid_map): without it, this process's
+//!   credential still predates the uid_map, and every filesystem it
+//!   mounts itself (the sandbox's own `/dev`, `/tmp`, and the overlay)
+//!   fails to create files in — EOVERFLOW for a fresh tmpfs, EPERM or a
+//!   silent read-only degrade for the overlay.
+//! - `Rootfs::chown_upper_and_work`, recursive, in the parent, before the
+//!   overlay is mounted: upper/work (and anything already staged into
+//!   them, e.g. via `SandboxManager::workspace_upper_dir` before the
+//!   sandbox process exists at all) must already be owned by this
+//!   sandbox's uid_base by the time the child — now credentialed as that
+//!   same uid — touches them.
+//! - The overlay is mounted in the CHILD, not the parent: mounting it in
+//!   the parent before clone3() (an earlier attempt at fixing the
+//!   overlay-in-userns failure) does avoid that failure, but the
+//!   resulting mount is "locked" to pivot_root from the child's own user
+//!   namespace regardless of propagation settings — verified by direct
+//!   comparison against mounting the same overlay inside the child.
+//! - The seccomp default filter's architecture check had its jt/jf
+//!   branches swapped, unconditionally killing every process running on
+//!   its own real (matching) architecture on its first post-install
+//!   syscall — caught by a standalone repro that did nothing but install
+//!   the filter and call getpid().
+//! - Capability dropping was reordered: `caps::drop_bounding_set_and_ambient`
+//!   (blueprint §6.2 step 11) must NOT clear effective/permitted before
+//!   step 14's setresuid/setresgid, which still needs CAP_SETUID/
+//!   CAP_SETGID to change to the sandbox's unprivileged uid/gid;
+//!   `caps::finish_dropping_capabilities` zeroes what's left afterward.
+//! - A concurrency bug in `SandboxManager`'s orphan-cgroup sweep, which
+//!   could delete a sibling sandbox's cgroup while it was still mid-launch
+//!   (empty `cgroup.procs` isn't unique to a crashed prior process's
+//!   leftovers), was fixed with an age-based grace period.
+//! - The base image now ships a placeholder `/etc/shadow` (images/base/
+//!   build.sh) — without one, `test_cannot_read_etc_shadow`'s read failed
+//!   with ENOENT, which proves nothing about confinement.
 //!
 //! Without the feature this file compiles to nothing — deliberately, rather
 //! than to a test that prints "skipping" and reports green, which would make

@@ -82,6 +82,14 @@ else
     echo "root:x:0:0:root:/root:/bin/sh" > "$ROOTFS_DIR/etc/passwd"
     echo "root:x:0:" > "$ROOTFS_DIR/etc/group"
     echo "nameserver 1.1.1.1" > "$ROOTFS_DIR/etc/resolv.conf"
+    # A real base image would ship a genuine, restrictively-permissioned
+    # /etc/shadow — this placeholder exists so hostile.rs's
+    # test_cannot_read_etc_shadow has a real file to attempt reading.
+    # Without it, the read fails with ENOENT (no such file), which the
+    # test correctly classifies as UNVERIFIED rather than DENIED: ENOENT
+    # proves nothing about confinement, only that the path is absent.
+    echo "root:!:19000:0:99999:7:::" > "$ROOTFS_DIR/etc/shadow"
+    chmod 0640 "$ROOTFS_DIR/etc/shadow"
 fi
 
 echo "Base image created at $ROOTFS_DIR"

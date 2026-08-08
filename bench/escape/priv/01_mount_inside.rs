@@ -4,9 +4,11 @@
 //! meaningful either way).
 //!
 //! Expected: BLOCKED (EPERM) — the sandbox's capability bounding set is
-//! emptied (caps::drop_all_capabilities) before execve, so mount(2) fails
-//! for lack of CAP_SYS_ADMIN in the process's own user namespace
-//! regardless of whether Landlock or L5 additionally cover it.
+//! emptied (caps::drop_bounding_set_and_ambient, then
+//! caps::finish_dropping_capabilities zeroes what's left after the
+//! uid/gid drop) before execve, so mount(2) fails for lack of
+//! CAP_SYS_ADMIN in the process's own user namespace regardless of
+//! whether Landlock or L5 additionally cover it.
 
 use aivisor_escape_bench::Outcome;
 use std::ffi::CString;

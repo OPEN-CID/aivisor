@@ -8,7 +8,10 @@ pub mod probe;
 pub mod rootfs;
 pub mod seccomp;
 
-pub use caps::{drop_all_capabilities, drop_to_unprivileged, set_no_new_privs};
+pub use caps::{
+    drop_bounding_set_and_ambient, drop_to_unprivileged, finish_dropping_capabilities,
+    set_no_new_privs,
+};
 pub use cgroup::Cgroup;
 pub use landlock::{apply_landlock, probe_landlock_abi};
 pub use launcher::{ChildMsg, LaunchPolicy, Launcher, Supervisor};
