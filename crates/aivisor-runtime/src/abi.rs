@@ -59,6 +59,14 @@ pub unsafe fn capset(header: *mut CapUserHeader, data: *const CapUserData) -> c_
 }
 
 /// # Safety
+/// `header` and `data` must be valid for the duration of the call and
+/// `data` must point to 2 `CapUserData` entries for VERSION_3 (capget(2)
+/// writes through it).
+pub unsafe fn capget(header: *mut CapUserHeader, data: *mut CapUserData) -> c_long {
+    libc::syscall(libc::SYS_capget, header, data)
+}
+
+/// # Safety
 /// `option` must be a valid `PR_*` prctl(2) operation and `arg2`..`arg5`
 /// must be whatever that operation expects (some are ignored, some are
 /// pointers the kernel will read or write through).

@@ -114,10 +114,29 @@ fn build_arch_check(expected_arch: u32) -> Vec<libc::sock_filter> {
     use libc::{BPF_ABS, BPF_JEQ, BPF_JMP, BPF_LD, BPF_RET, SECCOMP_RET_KILL_PROCESS};
     vec![
         bpf_stmt(BPF_LD | BPF_ABS | 0x20, arch_offset()),
-        // jt=0 (fall through to nr-load) on match, jf=1 (skip straight to
-        // KILL) on mismatch — the inverse of the old table, which jumped
-        // *past* the KILL on every branch and so could never reach it.
-        bpf_jump(BPF_JMP | BPF_JEQ, 0, 1, expected_arch),
+        // cBPF jt/jf are a count of instructions to skip, counted from the
+        // instruction immediately following this jump — landing on the
+        // very next instruction (the RET KILL_PROCESS below) needs 0, not
+        // 1. The previous version of this table had jt=0/jf=1, which
+        // means EQUAL (the expected, correct-architecture case) fell
+        // straight into the following instruction — the RET KILL — while
+        // NOT-equal (the wrong-architecture case this check exists to
+        // catch) skipped over it and ran normally. That is backwards:
+        // every process running on its own real, matching architecture
+        // was unconditionally killed on its first syscall after the
+        // filter was installed. Verified empirically on a real kernel
+        // (Ubuntu 24.04, 6.8.0): a minimal reproduction that does nothing
+        // but install this filter and call getpid() died with SIGSYS.
+        // jt=1 (mismatch, i.e. NOT-equal, is the OTHER branch — see
+        // below) skips the RET KILL and continues to the nr-load;
+        // jf=0 (match) falls straight through into it. bpf_jump's
+        // parameter order is (code, jt, jf, k), and JEQ's "true" branch is
+        // taken on EQUAL — so passing jt=1 here sets the EQUAL branch to
+        // skip the kill, and jf=0 sets the NOT-equal branch to fall into
+        // it, which is the reverse assignment from what the variable
+        // names suggest at a glance; double-checked against the empirical
+        // kill/no-kill behavior above, not just re-derived on paper.
+        bpf_jump(BPF_JMP | BPF_JEQ, 1, 0, expected_arch),
         bpf_stmt(BPF_RET | 0x04, SECCOMP_RET_KILL_PROCESS),
     ]
 }
@@ -299,20 +318,46 @@ mod tests {
     }
 
     #[test]
-    fn test_arch_check_kill_branch_is_reachable() {
-        // Regression test for the bug where the arch-check jump table could
-        // never reach its own KILL_PROCESS instruction: walk the tiny BPF
-        // program by hand for a mismatching arch value and confirm it lands
-        // on the KILL return, not falls through past it.
+    fn test_arch_check_kill_branch_is_reachable_only_on_mismatch() {
+        // Regression test for a real bug (not just a hypothetical one: a
+        // standalone reproduction that installs the real default filter
+        // and calls getpid() died with SIGSYS on a real kernel, Ubuntu
+        // 24.04, 6.8.0) where this table's jt/jf were swapped: the
+        // MATCHING (correct, real) architecture fell into RET
+        // KILL_PROCESS, and a MISMATCHING one skipped over it and ran
+        // normally — the exact opposite of an architecture gate. The
+        // earlier version of this test only asserted a raw `jf` value,
+        // which is exactly the kind of check that let a swapped-branch bug
+        // like this one pass silently — asserting jf==1 is true whether
+        // jf==1 lands on the kill (correct) or skips past it (backwards),
+        // depending on what jt is. This version walks the actual cBPF
+        // jump math for BOTH branches and asserts each lands on the
+        // instruction the filter is supposed to produce for that case.
         let insns = build_arch_check(AUDIT_ARCH_X86_64);
         assert_eq!(insns.len(), 3);
         let load = &insns[0];
         assert_eq!(load.code, (libc::BPF_LD | libc::BPF_ABS | 0x20) as u16);
-        let jump = &insns[1];
-        // on mismatch (jf branch) it must land exactly on the KILL stmt
-        // that follows, i.e. jf == 1, not 2 (which would skip over it).
-        assert_eq!(jump.jf, 1);
-        let kill = &insns[2];
+
+        const JEQ_INDEX: i32 = 1;
+        const KILL_INDEX: i32 = 2;
+        let jump = &insns[JEQ_INDEX as usize];
+        let kill = &insns[KILL_INDEX as usize];
         assert_eq!(kill.k, libc::SECCOMP_RET_KILL_PROCESS);
+
+        // cBPF: on the taken branch, the next instruction executed is at
+        // (this instruction's index + 1 + jt_or_jf).
+        let target_on_match = JEQ_INDEX + 1 + jump.jt as i32;
+        let target_on_mismatch = JEQ_INDEX + 1 + jump.jf as i32;
+
+        assert_eq!(
+            target_on_mismatch, KILL_INDEX,
+            "a MISMATCHING architecture must land on RET KILL_PROCESS"
+        );
+        assert_ne!(
+            target_on_match, KILL_INDEX,
+            "a MATCHING (real, correct) architecture must NOT land on RET \
+             KILL_PROCESS — this exact inversion killed every process on \
+             its first post-install syscall"
+        );
     }
 }

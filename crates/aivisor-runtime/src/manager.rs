@@ -106,7 +106,27 @@ impl SandboxManager {
     /// Full crash recovery (reattaching to a still-running sandbox after a
     /// daemon restart) needs a persistent sandbox registry and is Phase 4
     /// scope; this is the conservative, non-destructive interim behavior.
+    ///
+    /// Empty `cgroup.procs` alone is NOT enough to call something an
+    /// orphan: a sandbox mid-launch (`Cgroup::create` has made the
+    /// directory, but `Launcher::spawn`'s clone3(CLONE_INTO_CGROUP) or the
+    /// `join_cgroup_from_parent` fallback hasn't put a process in it yet)
+    /// is legitimately, transiently empty too — and this function can run
+    /// concurrently with that launch, from a DIFFERENT `SandboxManager` in
+    /// the same process (every test in this codebase constructs its own).
+    /// Verified empirically on a real kernel (Ubuntu 24.04, 6.8.0):
+    /// running privileged tests together intermittently killed a sibling
+    /// test's in-progress sandbox with "No such file or directory" from
+    /// clone3/cgroup.procs, because this sweep deleted its cgroup out from
+    /// under it between creation and first use. A cgroup genuinely
+    /// orphaned by a crashed PRIOR process is old — it was created before
+    /// this process even started — so skipping anything younger than
+    /// `ORPHAN_GRACE_PERIOD` distinguishes "abandoned by a dead daemon"
+    /// from "another live manager is still launching into it" without
+    /// needing the persistent registry Phase 4 crash recovery would add.
     fn adopt_or_clean_orphan_cgroups() {
+        const ORPHAN_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_secs(30);
+
         let cgroup_root = PathBuf::from(CGROUP_ROOT).join("aivisor");
         let Ok(entries) = std::fs::read_dir(&cgroup_root) else {
             return;
@@ -124,6 +144,18 @@ impl SandboxManager {
             if id_str.len() != 36 || !id_str.contains('-') {
                 continue;
             }
+
+            let age = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|m| m.elapsed().ok());
+            if !matches!(age, Some(age) if age >= ORPHAN_GRACE_PERIOD) {
+                // Too young to plausibly be a crash orphan (or age
+                // couldn't be determined at all) — leave it; a live
+                // launch may still be using it.
+                continue;
+            }
+
             let procs = std::fs::read_to_string(path.join("cgroup.procs")).unwrap_or_default();
             if procs.trim().is_empty() {
                 let _ = std::fs::remove_dir(&path);
