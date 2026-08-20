@@ -100,16 +100,51 @@ struct exec_rule {
 /* Network rule entry: LPM trie key + port bitmap (bit N set = port N
  * allowed, for N in 0..64; ports >= 64 are not expressible in v1 — see
  * net.bpf.c for the fail-closed behaviour on such a port).
+ *
+ * The matched data is (cgid, addr), cgid FIRST, and a lookup always
+ * supplies prefixlen = NET_KEY_PREFIX_FULL (all 64 cgid bits + all 32
+ * address bits). Because an LPM trie compares the data MSB-first and every
+ * stored rule pins all 64 cgid bits, a rule installed for one sandbox can
+ * never match another sandbox's lookup: the two differ within the first 64
+ * bits, so no common prefix reaching into the address bits exists. Without
+ * the cgid in the key (the previous shape), `net_rules` was a single global
+ * allowlist — any destination permitted for one sandbox was permitted for
+ * every sandbox, which is a cross-tenant policy leak, not defence in depth.
+ *
+ * `packed` is required, not cosmetic: the kernel's LPM trie treats every
+ * byte after the leading `prefixlen` as matchable data, so the 4 bytes of
+ * padding a natural layout would insert between `prefixlen` and `cgid`
+ * would become 32 bits of uninitialised key material.
+ *
+ * A rule for CIDR a.b.c.d/N is stored with prefixlen = 64 + N.
+ * MUST match `NetKey` in aivisor-bpf/src/maps.rs.
  */
+#define NET_KEY_CGID_BITS   64
+#define NET_KEY_PREFIX_FULL (NET_KEY_CGID_BITS + 32)
+
 struct net_key {
     __u32 prefixlen;
+    __u64 cgid;
     __u32 addr;       /* IPv4 only in v1 — see net.bpf.c for the IPv6 note */
-};
+} __attribute__((packed));
 
 /* BPF maps */
+/* BPF_F_NO_PREALLOC is load-bearing, not a memory tuning knob.
+ *
+ * Installing a new policy swaps a whole sandbox_ctx value in one
+ * bpf_map_update_elem. A preallocated hash map updates an existing element
+ * by copying the new value over it in place, so a program that has already
+ * taken its pointer can read some fields before the copy and some after —
+ * pairing, say, a new fs_rules_base with the old fs_rules_count and walking
+ * a range that was never a policy. With no-prealloc the update allocates a
+ * fresh element and swaps it under the bucket lock while the in-flight
+ * program keeps its RCU-protected pointer to the old one, so every reader
+ * sees exactly one generation of the policy.
+ */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 8192);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
     __type(key, __u64);              /* cgroup id */
     __type(value, struct sandbox_ctx);
 } sandboxes SEC(".maps");
@@ -128,9 +163,13 @@ struct {
     __type(value, struct exec_rule);
 } exec_rules SEC(".maps");
 
+/* BPF_F_NO_PREALLOC is mandatory for LPM tries, not a choice: trie_alloc()
+ * rejects the map outright with -EINVAL without it (kernel/bpf/lpm_trie.c).
+ */
 struct {
     __uint(type, BPF_MAP_TYPE_LPM_TRIE);
     __uint(max_entries, 4096);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
     __type(key, struct net_key);
     __type(value, __u64);            /* port bitmap */
 } net_rules SEC(".maps");

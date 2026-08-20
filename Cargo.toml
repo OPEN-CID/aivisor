@@ -31,3 +31,4 @@ camino = { version = "1", features = ["serde1"] }
 anyhow = "1"
 nix = { version = "0.29", features = ["fs", "process", "mount", "sched", "user", "signal"] }
 tokio = { version = "1", features = ["full"] }
+sha2 = "0.10"

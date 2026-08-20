@@ -167,10 +167,18 @@ int BPF_PROG(aivisor_path_unlink, const struct path *dir, struct dentry *dentry,
     return 0;
 }
 
-/* ---- lsm/path_rename (dirty-turn detection) ---- */
+/* ---- lsm/path_rename (dirty-turn detection) ----
+ *
+ * `flags` is not decoration: security_path_rename() takes it (RENAME_EXCHANGE
+ * and friends), so BPF_PROG must list it for `ret` to land on the hook's
+ * actual return argument. Omitting it silently bound `ret` to `flags`, so
+ * the guard below tested a rename flag and, on RENAME_NOREPLACE, returned
+ * 1 as the LSM verdict — a positive return where the verifier demands
+ * [-4095, 0], which is why this program failed to load at all.
+ */
 SEC("lsm/path_rename")
 int BPF_PROG(aivisor_path_rename, const struct path *old_dir, struct dentry *old_dentry,
-             const struct path *new_dir, struct dentry *new_dentry, int ret)
+             const struct path *new_dir, struct dentry *new_dentry, unsigned int flags, int ret)
 {
     if (ret != 0)
         return ret;

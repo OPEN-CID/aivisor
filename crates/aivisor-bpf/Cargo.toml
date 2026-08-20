@@ -11,3 +11,9 @@ tracing = { workspace = true }
 serde = { workspace = true }
 libbpf-rs = "0.24"
 libbpf-sys = "1.7"
+libc = "0.2"
+nix = { workspace = true }
+sha2 = { workspace = true }
+
+[features]
+privileged-tests = []

@@ -43,14 +43,22 @@ char LICENSE[] SEC("license") = "GPL";
 #define META_169_254_169_254 0xfea9fea9  /* 169.254.169.254 in network byte order */
 #define META_168_63_129_16   0x10813fa8  /* 168.63.129.16 */
 
-static __always_inline int check_ipv4_dst(__u64 cgid, struct sandbox_ctx *ctx, __u32 dst_be, __u16 port)
+static __always_inline int check_ipv4_dst(__u64 cgid, __u32 dst_be, __u16 port)
 {
     if (dst_be == META_169_254_169_254 || dst_be == META_168_63_129_16) {
         emit_event(cgid, EVT_KIND_CONNECT, EVT_DECISION_DENY, EPERM);
         return 0; /* deny */
     }
 
-    struct net_key key = { .prefixlen = 32, .addr = dst_be };
+    /* cgid is part of the matched key material — see common.h's net_key
+     * note. A lookup asks for the full prefix; the trie returns the
+     * longest stored rule that agrees, which can only ever be one of this
+     * sandbox's own rules. */
+    struct net_key key = {
+        .prefixlen = NET_KEY_PREFIX_FULL,
+        .cgid = cgid,
+        .addr = dst_be,
+    };
     __u64 *ports = bpf_map_lookup_elem(&net_rules, &key);
     if (!ports) {
         emit_event(cgid, EVT_KIND_CONNECT, EVT_DECISION_DENY, EPERM);
@@ -95,7 +103,7 @@ int BPF_PROG(aivisor_socket_connect, struct socket *sock, struct sockaddr *addre
         bpf_probe_read_kernel(&sin_addr, sizeof(sin_addr), &addr4->sin_addr);
         bpf_probe_read_kernel(&sin_port, sizeof(sin_port), &addr4->sin_port);
 
-        int allowed = check_ipv4_dst(cgid, sctx, sin_addr, bpf_ntohs(sin_port));
+        int allowed = check_ipv4_dst(cgid, sin_addr, bpf_ntohs(sin_port));
         return allowed ? 0 : -EPERM;
     }
     else if (family == AF_INET6) {
@@ -179,7 +187,7 @@ int aivisor_cgroup_connect4(struct bpf_sock_addr *ctx)
         return 1;
 
     __u16 port = bpf_ntohs((__u16)ctx->user_port);
-    return check_ipv4_dst(cgid, sctx, ctx->user_ip4, port);
+    return check_ipv4_dst(cgid, ctx->user_ip4, port);
 }
 
 SEC("cgroup/connect6")
