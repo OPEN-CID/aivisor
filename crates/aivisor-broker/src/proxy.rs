@@ -3,24 +3,14 @@ use std::sync::Mutex;
 
 use aivisor_core::{CgroupId, Error, SandboxId};
 
-/// Host-side egress proxy for sandboxed agents.
+/// Session state for the host-side egress proxy.
 ///
-/// **Current scope, honestly stated**: session issuance, byte-budget
-/// tracking and enforcement, and unix-socket peer verification (binding a
-/// session token to the cgroup that requested it). The full HTTP(S)
-/// terminating proxy described in blueprint.md §9.1 — TLS termination,
-/// host/method allowlist enforcement, credential injection from a secret
-/// backend, DNS pinning — is NOT implemented here. `serve()` below returns
-/// `Error::Unsupported` rather than silently doing nothing, so a caller
-/// that tries to actually stand up the broker finds out immediately rather
-/// than discovering a broker that accepts no connections. Implementing it
-/// is tracked as `TODO(phase3)`.
-///
-/// What IS enforced today (`issue_session`, `record_bytes`,
-/// `verify_peer_cgroup`) is real, not a stub: a session's byte budget is
-/// checked on every `record_bytes` call and further use is denied once
-/// exhausted, and `verify_peer_cgroup` reads the actual peer credentials
-/// off a connected unix socket rather than trusting a caller-supplied id.
+/// This type owns *who may egress and how much*: it issues opaque session
+/// tokens bound to a sandbox's cgroup, tracks each session's byte budget,
+/// and verifies a connecting peer really is the sandbox a token was issued
+/// for. The request path that consumes all of it — host and method
+/// allowlists, credential injection, DNS pinning — lives in
+/// [`crate::egress::EgressProxy`].
 #[derive(Default)]
 pub struct Broker {
     sessions: Mutex<HashMap<String, SessionState>>,
@@ -138,19 +128,6 @@ impl Broker {
         let mut stats = HashMap::new();
         stats.insert("active_sessions".into(), sessions.len() as u64);
         stats
-    }
-
-    /// TODO(phase3): stand up the actual HTTP(S) terminating proxy —
-    /// listen on the unix socket / veth link-local address, terminate TLS,
-    /// enforce the policy's host/method allowlist, inject credentials from
-    /// the secret backend on the way out, and call `record_bytes` /
-    /// `verify_peer_cgroup` per connection. Left unimplemented rather than
-    /// half-built so a caller that reaches for it fails loudly instead of
-    /// silently getting a broker that accepts no traffic.
-    pub fn serve(&self, _listen_addr: &str) -> Result<(), Error> {
-        Err(Error::Unsupported(
-            "broker HTTP(S) proxy listener not implemented in this build".into(),
-        ))
     }
 }
 
@@ -330,13 +307,6 @@ mod tests {
         let broker = Broker::new();
         let token = broker.issue_session(SandboxId::new()).unwrap();
         assert!(broker.verify_peer_cgroup(&token, CgroupId::new(1)).is_err());
-    }
-
-    #[test]
-    fn test_serve_is_explicitly_unsupported_not_silently_noop() {
-        let broker = Broker::new();
-        let result = broker.serve("127.0.0.1:3128");
-        assert!(result.is_err());
     }
 
     #[cfg(target_os = "linux")]
