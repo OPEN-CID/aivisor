@@ -134,10 +134,7 @@ impl BpfLoader {
                             })?;
                         }
                         prog.pin(&pin_path).map_err(|e| {
-                            Error::LaunchFailed(format!(
-                                "pin program {}: {e}",
-                                pin_path.display()
-                            ))
+                            Error::LaunchFailed(format!("pin program {}: {e}", pin_path.display()))
                         })?;
                         cgroup_progs.push((*name, prog_name));
                     }

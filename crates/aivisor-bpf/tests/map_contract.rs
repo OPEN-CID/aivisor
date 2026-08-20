@@ -128,7 +128,9 @@ fn policy_install_writes_through(m: &BpfManager) {
     // Installing policy for a sandbox that was never registered must fail
     // loudly. Silently succeeding would mean "policy installed" with no map
     // entry and no enforcement anywhere.
-    assert!(m.update_policy(b, &plan(vec![], vec![], vec![]), ExecSource::HostPaths).is_err());
+    assert!(m
+        .update_policy(b, &plan(vec![], vec![], vec![]), ExecSource::HostPaths)
+        .is_err());
 
     m.register_sandbox(a).expect("register a");
     m.register_sandbox(b).expect("register b");
@@ -145,7 +147,8 @@ fn policy_install_writes_through(m: &BpfManager) {
             ports: vec![53],
         }],
     );
-    m.update_policy(a, &p, ExecSource::HostPaths).expect("install policy on a");
+    m.update_policy(a, &p, ExecSource::HostPaths)
+        .expect("install policy on a");
 
     let ctx_a = m.read_ctx(a).expect("read ctx a after install");
     assert_eq!(ctx_a.fs_rules_count, 2);
@@ -161,7 +164,8 @@ fn policy_install_writes_through(m: &BpfManager) {
     );
 
     // A second sandbox must get a disjoint rule range.
-    m.update_policy(b, &p, ExecSource::HostPaths).expect("install policy on b");
+    m.update_policy(b, &p, ExecSource::HostPaths)
+        .expect("install policy on b");
     let ctx_b = m.read_ctx(b).expect("read ctx b");
     let a_range = ctx_a.fs_rules_base..ctx_a.fs_rules_base + ctx_a.fs_rules_count;
     let b_range = ctx_b.fs_rules_base..ctx_b.fs_rules_base + ctx_b.fs_rules_count;
@@ -173,7 +177,8 @@ fn policy_install_writes_through(m: &BpfManager) {
 
     // Reinstalling must advance the generation.
     let gen_before = m.read_ctx(a).unwrap().policy_gen;
-    m.update_policy(a, &p, ExecSource::HostPaths).expect("reinstall policy on a");
+    m.update_policy(a, &p, ExecSource::HostPaths)
+        .expect("reinstall policy on a");
     assert!(
         m.read_ctx(a).unwrap().policy_gen > gen_before,
         "reinstall must advance the policy generation"
@@ -190,7 +195,10 @@ fn oversized_policy_is_refused(m: &BpfManager) {
     m.register_sandbox(cgid).expect("register");
 
     let too_many = plan(fs_rules(MAX_RULES_PER_SANDBOX + 1), vec![], vec![]);
-    let err = m.update_policy(cgid, &too_many, ExecSource::HostPaths).unwrap_err().to_string();
+    let err = m
+        .update_policy(cgid, &too_many, ExecSource::HostPaths)
+        .unwrap_err()
+        .to_string();
     assert!(
         err.contains("silently unenforced"),
         "unexpected error: {err}"
