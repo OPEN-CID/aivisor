@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 aivisor-core = { path = "../aivisor-core" }
 aivisor-policy = { path = "../aivisor-policy" }
+aivisor-bpf = { path = "../aivisor-bpf" }
 rustix = { workspace = true, features = ["fs", "process", "mount", "time", "net", "thread", "param", "stdio"] }
 thiserror = { workspace = true }
 serde = { workspace = true }

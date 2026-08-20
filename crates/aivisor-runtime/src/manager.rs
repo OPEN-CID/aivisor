@@ -3,9 +3,13 @@ use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
-use aivisor_core::{Error, SandboxId, SandboxSpec, SandboxState};
-use aivisor_policy::{AccessDefault, FsPolicy, FsRule, NetPolicy, Policy};
+use aivisor_bpf::{attach_cgroup_hooks, BpfManager, CgroupProgAttachment, ExecSource};
+use aivisor_core::{CgroupId, Error, ExecIdentity, SandboxId, SandboxSpec, SandboxState};
+use aivisor_policy::{
+    AccessDefault, ExecRule as PolicyExecRule, FsPolicy, FsRule, NetPolicy, Policy,
+};
 use nix::sys::signal::Signal;
+use std::sync::Arc;
 
 use crate::cgroup::Cgroup;
 use crate::landlock::probe_landlock_abi;
@@ -23,6 +27,9 @@ pub struct SandboxHandle {
     pub cgroup: Option<Cgroup>,
     pub supervisor: Option<Supervisor>,
     pub rootfs: Option<Rootfs>,
+    /// cgroup/connect4|6 programs attached to this sandbox's cgroup.
+    /// Detached when dropped, during `destroy`.
+    bpf_attachments: Vec<CgroupProgAttachment>,
 }
 
 #[derive(serde::Serialize)]
@@ -47,6 +54,10 @@ pub struct SandboxManager {
     /// no-landlock` opt-out (roadmap.md Phase 2 DoD) would thread an
     /// override into this probe call, not bypass it after the fact.
     landlock_abi: u32,
+    /// Shared, process-wide BPF enforcement (see `crate::bpf`). Acquired in
+    /// `new()`, so a host without working BPF LSM fails at construction
+    /// rather than silently launching sandboxes with layer 5 missing.
+    bpf: Arc<BpfManager>,
 }
 
 impl SandboxManager {
@@ -73,6 +84,7 @@ impl SandboxManager {
         })?;
 
         let landlock_abi = probe_landlock_abi(1)?;
+        let bpf = crate::bpf::enforcement()?;
 
         let launcher = Launcher::new(caps);
 
@@ -85,6 +97,7 @@ impl SandboxManager {
             }),
             launcher,
             landlock_abi,
+            bpf,
         })
     }
 
@@ -173,8 +186,31 @@ impl SandboxManager {
         let cgroup = Cgroup::create(&cgroup_root, &id)?;
         cgroup.apply(&spec.limits)?;
 
-        let template_dir = PathBuf::from(TEMPLATES_DIR).join(&spec.template);
-        let rootfs = Rootfs::prepare(&template_dir, &spec.workspace, &id.to_string())?;
+        // Register a deny-all BPF context now, while the cgroup is still
+        // empty. Every later step can only relax this, and no process can
+        // exist in the cgroup before it — which is what "register before
+        // the child is unblocked" (blueprint §6.2) reduces to here.
+        self.bpf.register_sandbox(cgroup.id)?;
+
+        // From here on, any failure must undo the registration, or the
+        // entry leaks and the cgroup id — which the kernel reuses — could
+        // later be re-registered and rejected as a duplicate.
+        let setup = (|| -> Result<(Rootfs, Vec<CgroupProgAttachment>), Error> {
+            let template_dir = PathBuf::from(TEMPLATES_DIR).join(&spec.template);
+            let rootfs = Rootfs::prepare(&template_dir, &spec.workspace, &id.to_string())?;
+            // connect4/connect6 are cgroup-scoped rather than global, so
+            // unlike the LSM programs they attach per sandbox.
+            let attachments = attach_cgroup_hooks(cgroup.fd.as_raw_fd())?;
+            Ok((rootfs, attachments))
+        })();
+
+        let (rootfs, bpf_attachments) = match setup {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = self.bpf.deregister_sandbox(&cgroup.id);
+                return Err(e);
+            }
+        };
 
         let mut inner = self.lock_inner();
 
@@ -187,6 +223,7 @@ impl SandboxManager {
                 cgroup: Some(cgroup),
                 supervisor: None,
                 rootfs: Some(rootfs),
+                bpf_attachments,
             },
         );
 
@@ -213,7 +250,7 @@ impl SandboxManager {
         // single global mutex across that would serialize every sandbox in
         // the process against every other one, including unrelated
         // create/list/destroy calls.
-        let (spec, cg_fd_owner, rootfs, resolved_policy) = {
+        let (spec, cg_fd_owner, rootfs, resolved_policy, cgid) = {
             let mut inner = self.lock_inner();
 
             let policy = self.resolve_policy_locked(&inner, id)?;
@@ -222,6 +259,18 @@ impl SandboxManager {
                 .registry
                 .get_mut(&id.to_string())
                 .ok_or(Error::LaunchFailed("sandbox not found".into()))?;
+
+            // One payload at a time. This is not just bookkeeping: the
+            // launch below returns the sandbox to the non-enforcing setup
+            // state so the new child can build its mount namespace, and
+            // doing that while an earlier payload is still running would
+            // drop that payload out of enforcement.
+            if handle.state == SandboxState::Running {
+                return Err(Error::LaunchFailed(format!(
+                    "sandbox {id} is already running a command; aivisor runs one payload \
+                     per sandbox at a time"
+                )));
+            }
 
             handle.state = SandboxState::Running;
 
@@ -247,15 +296,40 @@ impl SandboxManager {
             }
             let cg_fd_owner: OwnedFd = unsafe { OwnedFd::from_raw_fd(dup_fd) };
 
-            (handle.spec.clone(), cg_fd_owner, rootfs, policy)
+            (handle.spec.clone(), cg_fd_owner, rootfs, policy, cgroup.id)
         };
 
         let launch_policy = self.build_launch_policy(&resolved_policy, cmd)?;
+        let bpf_plan = resolved_policy.compile_bpf();
+
+        // The incoming child builds its own mount namespace from inside
+        // this cgroup, and `lsm/sb_mount` denies mounts by a sandbox that
+        // is enforcing. Safe here because the `Running` guard above
+        // guarantees no payload is live in this sandbox.
+        self.bpf.begin_setup(cgid)?;
+
+        // Called by the launcher once the child is confined and has
+        // reported the exec identities it can see, but before it is
+        // released to execve. Until this runs the sandbox still holds the
+        // deny-all context installed at `create`.
+        // Installed at the launcher's handshake, from identities the child
+        // observed inside its own mount namespace — see ExecIdentity for
+        // why they cannot be derived here.
+        let install_policy = |exec_ids: &[ExecIdentity]| -> Result<(), Error> {
+            self.bpf
+                .update_policy(cgid, &bpf_plan, ExecSource::Resolved(exec_ids))
+        };
 
         let cg_fd = cg_fd_owner.as_raw_fd();
-        let spawn_result = self
-            .launcher
-            .spawn(&spec, cg_fd, &rootfs, &launch_policy, cmd, args);
+        let spawn_result = self.launcher.spawn(
+            &spec,
+            cg_fd,
+            &rootfs,
+            &launch_policy,
+            cmd,
+            args,
+            &install_policy,
+        );
         drop(cg_fd_owner);
 
         let supervisor = match spawn_result {
@@ -308,6 +382,29 @@ impl SandboxManager {
     fn build_launch_policy(&self, policy: &Policy, cmd: &str) -> Result<LaunchPolicy, Error> {
         let mut landlock_plan = policy.compile_landlock(self.landlock_abi);
 
+        // Which binaries the child should report identities for. This
+        // mirrors the Landlock decision immediately below: with no explicit
+        // exec policy the only executable allowed is the one being run, so
+        // that is the only identity to install. Leaving this empty would
+        // give the sandbox an empty exec allowlist, and the exec hook
+        // denies on no match — the command would be refused by layer 5
+        // even though Landlock permitted it.
+        let mut exec_paths = Vec::new();
+        let mut exec_prefixes = Vec::new();
+        match &policy.exec {
+            None => exec_paths.push(cmd.to_string()),
+            Some(exec) => {
+                for rule in &exec.allow {
+                    match rule {
+                        PolicyExecRule::Path { path, .. } => exec_paths.push(path.clone()),
+                        PolicyExecRule::Prefix(prefix) => {
+                            exec_prefixes.push(prefix.to_string_lossy().into_owned())
+                        }
+                    }
+                }
+            }
+        }
+
         if policy.exec.is_none() {
             // No explicit exec policy: least-privilege dynamic default —
             // grant EXECUTE+READ_FILE on exactly the binary this call is
@@ -328,6 +425,8 @@ impl SandboxManager {
         Ok(LaunchPolicy {
             landlock: landlock_plan,
             seccomp_profile: seccomp_plan.profile,
+            exec_paths,
+            exec_prefixes,
         })
     }
 
@@ -364,9 +463,13 @@ impl SandboxManager {
     /// workspace, then remove the cgroup directory. Idempotent: destroying
     /// an already-gone or never-launched sandbox is not an error.
     ///
-    /// TODO(phase3): deregister from BPF maps LAST, after the cgroup is
-    /// confirmed empty and unmounted — before that layer exists, this
-    /// function's ordering already reserves the "last" slot for it.
+    /// The BPF context is removed LAST, after the cgroup is confirmed empty
+    /// (roadmap Phase 3 failure mode #3: "deleting map entries before
+    /// cgroup empty"). Any process still alive in the cgroup keeps its
+    /// enforcement until the moment there are none left; dropping the
+    /// context earlier would make every surviving task look like a host
+    /// process to the LSM hooks — `if (!ctx) return 0;` — and leave it
+    /// briefly unconfined.
     pub fn destroy(&self, id: &SandboxId) -> Result<(), Error> {
         let removed = {
             let mut inner = self.lock_inner();
@@ -381,13 +484,24 @@ impl SandboxManager {
             let _ = supervisor.signal(Signal::SIGKILL);
         }
 
+        let cgid: Option<CgroupId> = handle.cgroup.as_ref().map(|c| c.id);
+
         if let Some(cg) = handle.cgroup.take() {
             // Cgroup::destroy() already does kill_all + wait_for_empty +
             // rmdir, in that order, and surfaces real errors instead of
             // being swallowed — a caller that ignores this Err would not
             // know a sandbox failed to fully tear down.
+            //
+            // On failure the BPF context is deliberately left in place:
+            // the cgroup could not be confirmed empty, so something may
+            // still be running in it and must stay confined.
             cg.destroy()?;
         }
+
+        // The cgroup is gone, so these have nothing left to be attached to;
+        // dropping them detaches explicitly rather than relying on the
+        // cgroup's removal to do it.
+        handle.bpf_attachments.clear();
 
         if let Some(rootfs) = handle.rootfs.take() {
             // Best-effort: the overlay mount itself lived inside the
@@ -398,6 +512,11 @@ impl SandboxManager {
             if let Some(sandbox_dir) = rootfs.upper.parent() {
                 let _ = std::fs::remove_dir_all(sandbox_dir);
             }
+        }
+
+        // Last, as documented above.
+        if let Some(cgid) = cgid {
+            self.bpf.deregister_sandbox(&cgid)?;
         }
 
         Ok(())

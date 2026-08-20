@@ -22,9 +22,19 @@
 
 char LICENSE[] SEC("license") = "GPL";
 
+/* Argument order and count must match security_sb_mount() exactly:
+ *
+ *   int security_sb_mount(const char *dev_name, const struct path *path,
+ *                         const char *type, unsigned long flags, void *data)
+ *
+ * BPF_PROG assigns parameters positionally, so the previous signature —
+ * which swapped the first two and dropped `type` — bound `ret` to `data`,
+ * a pointer. The guard below then tested a pointer for non-zero and
+ * returned it as the LSM verdict.
+ */
 SEC("lsm/sb_mount")
-int BPF_PROG(aivisor_sb_mount, const struct path *path, const char *dev_name,
-             unsigned long flags, void *data, int ret)
+int BPF_PROG(aivisor_sb_mount, const char *dev_name, const struct path *path,
+             const char *type, unsigned long flags, void *data, int ret)
 {
     if (ret != 0)
         return ret;

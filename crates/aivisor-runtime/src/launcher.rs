@@ -5,7 +5,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use aivisor_core::{Error, SandboxSpec};
+use aivisor_core::{Error, ExecIdentity, SandboxSpec};
 use aivisor_policy::LandlockPlan;
 use serde::{Deserialize, Serialize};
 
@@ -18,7 +18,22 @@ use crate::seccomp;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ChildMsg {
-    Ready,
+    /// Fully confined and about to `execve`.
+    ///
+    /// `exec_ids` carries the identity of every binary the policy allows
+    /// this launch to execute, observed from inside the sandbox's own
+    /// mount namespace. Only the child can see these: the overlay is
+    /// mounted in its namespace, and the device the exec hook matches on
+    /// belongs to that mount (see [`aivisor_core::ExecIdentity`]).
+    ///
+    /// The child blocks after sending this until the parent acknowledges.
+    /// That pause is what lets the parent install policy and switch BPF
+    /// enforcement on at the one moment when the sandbox has finished
+    /// building its mount namespace but has not yet run anything
+    /// untrusted.
+    Ready {
+        exec_ids: Vec<ExecIdentity>,
+    },
     Error(String),
     Exited(i32),
 }
@@ -34,10 +49,25 @@ const UID_RANGE_SIZE: u32 = 65536;
 const SANDBOX_UID: u32 = 1000;
 const SANDBOX_GID: u32 = 1000;
 
+/// Exit status the child uses when it never reached the program at all —
+/// any failure in `child_setup`, including a refused `execve`. Callers
+/// distinguish it from a program that genuinely exited 127 by the presence
+/// of a `ChildMsg::Error` on the sync socket (see `late_child_error`).
+pub const CHILD_SETUP_FAILED_EXIT: i32 = 127;
+
 #[derive(Debug)]
 pub struct Supervisor {
     pub pid: nix::unistd::Pid,
     pub pidfd: OwnedFd,
+    /// Kept open past the handshake purely for diagnostics.
+    ///
+    /// Everything the child does after the parent releases it — the
+    /// `execve` itself, most obviously — can still fail, and at that point
+    /// nobody is reading this socket any more. The child reports the reason
+    /// and exits 127, so without this the caller sees a bare exit code 127
+    /// and no explanation. A refused `execve` is precisely that case, which
+    /// makes it the most common failure the sandbox can produce.
+    sync: Option<UnixStream>,
 }
 
 impl Supervisor {
@@ -76,7 +106,32 @@ impl Supervisor {
             libc::CLD_KILLED | libc::CLD_DUMPED => 128 + si_status,
             _ => si_status,
         };
+
+        // 127 is what the child exits with when it never reached the
+        // program. Distinguish that from a program that genuinely exited
+        // 127 by looking for a reason on the sync socket: only the child's
+        // own failure path writes one.
+        if code == CHILD_SETUP_FAILED_EXIT {
+            if let Some(reason) = self.late_child_error() {
+                return Err(Error::LaunchFailed(reason));
+            }
+        }
+
         Ok(code)
+    }
+
+    /// Read a `ChildMsg::Error` the child left behind after it was
+    /// released, if there is one. Never blocks: the child has already been
+    /// reaped by the time this runs, so anything it sent is buffered and
+    /// readable now, and anything else means it sent nothing.
+    fn late_child_error(&self) -> Option<String> {
+        let sock = self.sync.as_ref()?;
+        sock.set_nonblocking(true).ok()?;
+        let mut sock = sock.try_clone().ok()?;
+        match recv_msg(&mut sock) {
+            Ok(ChildMsg::Error(e)) => Some(e),
+            _ => None,
+        }
     }
 
     pub fn signal(&self, sig: nix::sys::signal::Signal) -> Result<(), Error> {
@@ -106,6 +161,13 @@ impl Supervisor {
 pub struct LaunchPolicy {
     pub landlock: LandlockPlan,
     pub seccomp_profile: String,
+    /// Exact in-sandbox paths the policy allows to be executed. The child
+    /// resolves these to `(dev, inode)` after `pivot_root` and reports them
+    /// in [`ChildMsg::Ready`] — see `collect_exec_identities`.
+    pub exec_paths: Vec<String>,
+    /// In-sandbox directories whose immediate executable entries are
+    /// allowed. Expanded by the child, the same way.
+    pub exec_prefixes: Vec<String>,
 }
 
 pub struct Launcher {
@@ -130,6 +192,7 @@ impl Launcher {
         policy: &LaunchPolicy,
         cmd: &str,
         args: &[String],
+        install_policy: &dyn Fn(&[ExecIdentity]) -> Result<(), Error>,
     ) -> Result<Supervisor, Error> {
         let (parent_end, child_end) =
             UnixStream::pair().map_err(|e| Error::LaunchFailed(format!("sync socketpair: {e}")))?;
@@ -212,7 +275,7 @@ impl Launcher {
                 Err(e) => ChildMsg::Error(e),
             };
             let _ = send_msg(&mut child_end, &msg);
-            unsafe { libc::_exit(127) };
+            unsafe { libc::_exit(CHILD_SETUP_FAILED_EXIT) };
         }
 
         // ---- PARENT ----
@@ -258,8 +321,8 @@ impl Launcher {
             .map_err(|e| Error::LaunchFailed(format!("sync send: {e}")))?;
 
         let msg: ChildMsg = recv_msg(&mut parent_end)?;
-        match msg {
-            ChildMsg::Ready => {}
+        let exec_ids = match msg {
+            ChildMsg::Ready { exec_ids } => exec_ids,
             ChildMsg::Error(e) => {
                 kill_via_pidfd(pidfd.as_raw_fd());
                 return Err(Error::LaunchFailed(format!("child error: {e}")));
@@ -267,9 +330,32 @@ impl Launcher {
             ChildMsg::Exited(code) => {
                 return Err(Error::LaunchFailed(format!("child exited early: {code}")));
             }
+        };
+
+        // The child is fully confined but has not yet execve'd; it is
+        // blocked waiting for the acknowledgement below. This is the point
+        // at which policy is installed and enforcement switched on: any
+        // earlier and the child's own mount setup would be denied by
+        // lsm/sb_mount, any later and untrusted code would already be
+        // running.
+        //
+        // A failure here kills the sandbox rather than releasing it — the
+        // alternative is a child that runs with enforcement still off.
+        if let Err(e) = install_policy(&exec_ids) {
+            kill_via_pidfd(pidfd.as_raw_fd());
+            return Err(e);
         }
 
-        Ok(Supervisor { pid, pidfd })
+        if let Err(e) = parent_end.write_all(&[1u8]) {
+            kill_via_pidfd(pidfd.as_raw_fd());
+            return Err(Error::LaunchFailed(format!("release child: {e}")));
+        }
+
+        Ok(Supervisor {
+            pid,
+            pidfd,
+            sync: Some(parent_end),
+        })
     }
 
     /// Runs entirely in the child. Returns `Err(message)` on any failure;
@@ -340,6 +426,12 @@ impl Launcher {
             .map_err(|e| format!("mkdir workspace: {e}"))?;
         pivot_into(rootfs_merged_c)?;
 
+        // Collect exec identities here: after pivot_root, so paths resolve
+        // against the sandbox's own root and /proc/self/mountinfo describes
+        // the final mount tree, and before Landlock and seccomp, which may
+        // deny the stat and /proc reads this needs.
+        let exec_ids = collect_exec_identities(&policy.exec_paths, &policy.exec_prefixes)?;
+
         // Step 11: drop the capability bounding set + ambient/inheritable.
         // Deliberately NOT effective/permitted yet — step 14 below still
         // needs CAP_SETUID/CAP_SETGID to change uid/gid at all. See
@@ -364,7 +456,16 @@ impl Launcher {
         // earlier (as this code once did, right after pivot_root) tells the
         // control plane the sandbox is confined while capabilities/Landlock/
         // seccomp/uid-drop are still pending.
-        send_msg(sync, &ChildMsg::Ready).map_err(|e| format!("send ready: {e}"))?;
+        send_msg(sync, &ChildMsg::Ready { exec_ids }).map_err(|e| format!("send ready: {e}"))?;
+
+        // Block until the parent has installed policy and switched
+        // enforcement on. Without this wait the child could win the race
+        // and execve while enforcement was still off, which is the one
+        // window in the whole launch where untrusted code could run
+        // unconfined.
+        let mut go = [0u8; 1];
+        sync.read_exact(&mut go)
+            .map_err(|e| format!("wait for policy install: {e}"))?;
 
         let cmd_c = CString::new(cmd).map_err(|e| format!("CString cmd: {e}"))?;
         let mut exec_args: Vec<CString> = Vec::with_capacity(args.len() + 1);
@@ -458,6 +559,117 @@ fn send_msg(sock: &mut UnixStream, msg: &ChildMsg) -> std::io::Result<()> {
     let len = (bytes.len() as u32).to_le_bytes();
     sock.write_all(&len)?;
     sock.write_all(&bytes)
+}
+
+/// The mount table as `(mount point, kernel dev_t)`, most specific first.
+///
+/// `/proc/self/mountinfo` is the only interface that reports a mount's real
+/// `MAJ:MIN`. `stat(2)` will not do: on an overlay it returns a synthesised
+/// per-layer pseudo device instead of the superblock's own, which is what
+/// the exec hook compares against. See [`ExecIdentity`].
+///
+/// Fields are, per `Documentation/filesystems/proc.rst`:
+/// `id parent MAJ:MIN root mount-point options...`
+fn read_mount_devices() -> Result<Vec<(String, u64)>, String> {
+    let raw = std::fs::read_to_string("/proc/self/mountinfo")
+        .map_err(|e| format!("read /proc/self/mountinfo: {e}"))?;
+
+    let mut mounts = Vec::new();
+    for line in raw.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(_id), Some(_parent), Some(dev), Some(_root), Some(point)) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        ) else {
+            continue;
+        };
+        let Some((major, minor)) = dev.split_once(':') else {
+            continue;
+        };
+        let (Ok(major), Ok(minor)) = (major.parse::<u64>(), minor.parse::<u64>()) else {
+            continue;
+        };
+        // Kernel dev_t encoding, which is what struct super_block::s_dev
+        // holds and therefore what the BPF side compares against. This is
+        // NOT glibc's st_dev layout.
+        mounts.push((point.to_string(), (major << 20) | minor));
+    }
+
+    // Longest mount point first, so the lookup below finds the most
+    // specific mount covering a path (e.g. /tmp before /).
+    mounts.sort_by_key(|(point, _)| std::cmp::Reverse(point.len()));
+    Ok(mounts)
+}
+
+/// Kernel `dev_t` of the mount that `path` resolves on.
+fn device_for_path(mounts: &[(String, u64)], path: &str) -> Result<u64, String> {
+    mounts
+        .iter()
+        .find(|(point, _)| {
+            path == point
+                || path.starts_with(point)
+                    && (point == "/" || path.as_bytes().get(point.len()) == Some(&b'/'))
+        })
+        .map(|(_, dev)| *dev)
+        .ok_or_else(|| format!("no mount covers {path:?}"))
+}
+
+/// Identify every allowlisted executable from inside the sandbox, so the
+/// parent can build exec rules the kernel will actually match.
+///
+/// Runs in the child, after `pivot_root`, so paths and the mount table are
+/// both the sandbox's own.
+///
+/// A listed path that does not exist is an error rather than a skip: a
+/// typo'd or missing binary would otherwise silently produce a shorter
+/// allowlist than the policy asked for, surfacing much later as an
+/// unexplained exec denial.
+fn collect_exec_identities(
+    paths: &[String],
+    prefixes: &[String],
+) -> Result<Vec<ExecIdentity>, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    if paths.is_empty() && prefixes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mounts = read_mount_devices()?;
+    let mut out = Vec::new();
+
+    for path in paths {
+        let meta = std::fs::metadata(path)
+            .map_err(|e| format!("stat allowlisted executable {path:?} inside sandbox: {e}"))?;
+        out.push(ExecIdentity {
+            dev: device_for_path(&mounts, path)?,
+            inode: meta.ino(),
+        });
+    }
+
+    for prefix in prefixes {
+        let dev = device_for_path(&mounts, prefix)?;
+        let entries = std::fs::read_dir(prefix)
+            .map_err(|e| format!("read exec prefix {prefix:?} inside sandbox: {e}"))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("read exec prefix {prefix:?}: {e}"))?;
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            // Only regular files with an execute bit can ever reach the
+            // exec hook; anything else would just consume a rule slot.
+            if meta.is_file() && meta.mode() & 0o111 != 0 {
+                out.push(ExecIdentity {
+                    dev,
+                    inode: meta.ino(),
+                });
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 fn recv_msg(sock: &mut UnixStream) -> Result<ChildMsg, Error> {

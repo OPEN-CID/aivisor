@@ -1,10 +1,10 @@
-use std::os::unix::io::RawFd;
+use std::os::unix::io::{FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
 
 use aivisor_core::Error;
 use libbpf_rs::{Link, MapCore, Object, ObjectBuilder, ProgramType};
 
-const PIN_DIR: &str = "/sys/fs/bpf/aivisor";
+pub(crate) const PIN_DIR: &str = "/sys/fs/bpf/aivisor";
 
 /// Manages BPF program lifecycle: load, attach, pin.
 ///
@@ -23,6 +23,24 @@ pub struct BpfLoader;
 /// `attach_cgroup_program` below, using the names
 /// `LoadedPrograms::pending_cgroup_programs` reports.
 const OBJECTS: &[&str] = &["fs", "exec", "net", "priv", "task"];
+
+/// The maps declared in `common.h`, which every object includes and which
+/// must therefore resolve to one shared instance each.
+///
+/// This is an explicit list rather than "every map in the object" because
+/// libbpf synthesises per-object internal maps for a program's global data
+/// — `exec.rodata`, `.bss`, and friends. Those are private to one object by
+/// definition: a `.rodata` map is frozen after load, so trying to reuse one
+/// across objects fails the whole load with EPERM. Pinning indiscriminately
+/// worked only for as long as no BPF program had any global data.
+const SHARED_MAPS: &[&str] = &[
+    "sandboxes",
+    "fs_rules",
+    "exec_rules",
+    "net_rules",
+    "events",
+    "scratch",
+];
 
 impl BpfLoader {
     pub fn new() -> Result<Self, Error> {
@@ -51,19 +69,76 @@ impl BpfLoader {
 
         for name in OBJECTS {
             let path = obj_dir.join(format!("{name}.bpf.o"));
-            let open_obj = ObjectBuilder::default().open_file(&path).map_err(|e| {
+            let mut open_obj = ObjectBuilder::default().open_file(&path).map_err(|e| {
                 Error::LaunchFailed(format!("open BPF object {}: {e}", path.display()))
             })?;
-            let mut obj: Object = open_obj
+
+            // Set a pin path on every map BEFORE loading, so libbpf reuses
+            // an existing pin instead of creating a fresh map.
+            //
+            // This is what makes the five objects share state. Each of
+            // them includes common.h and therefore declares its own
+            // `sandboxes`, `fs_rules`, ... definitions; without reuse,
+            // loading them produces five *independent* maps that happen to
+            // have the same names. Userspace would then register a sandbox
+            // in whichever copy it opened while the other four programs
+            // kept consulting empty maps, took the `if (!ctx) return 0;`
+            // path meant for host processes, and enforced nothing at all.
+            // Pinning after load (the previous approach) could not fix
+            // that: the first object won the pin and the rest silently
+            // skipped it because the path already existed.
+            for mut map in open_obj.maps_mut() {
+                let map_name = map.name().to_string_lossy().into_owned();
+                if !SHARED_MAPS.contains(&map_name.as_str()) {
+                    continue;
+                }
+                let pin_path = PathBuf::from(PIN_DIR).join(&map_name);
+                map.set_pin_path(&pin_path).map_err(|e| {
+                    Error::LaunchFailed(format!(
+                        "set pin path {} for map in {name}: {e}",
+                        pin_path.display()
+                    ))
+                })?;
+            }
+
+            let obj: Object = open_obj
                 .load()
                 .map_err(|e| Error::LaunchFailed(format!("load BPF object {name}: {e}")))?;
 
-            for prog in obj.progs_mut() {
+            for mut prog in obj.progs_mut() {
                 match prog.prog_type() {
                     ProgramType::CgroupSockAddr => {
                         // Deferred: attached per-sandbox-cgroup by the
-                        // caller via attach_cgroup_hooks, not here.
+                        // caller via attach_cgroup_program, not here.
+                        //
+                        // Pinning is what makes that possible at all. The
+                        // attach happens later, from a caller that does not
+                        // hold this `Object` — `libbpf_rs::Object` is
+                        // `!Send`, so it cannot be stashed in a shared
+                        // singleton the way the map handles can. The pin is
+                        // the only handle that outlives this scope.
                         let prog_name = prog.name().to_string_lossy().into_owned();
+                        let pin_path = PathBuf::from(PIN_DIR).join(&prog_name);
+                        if pin_path.exists() {
+                            // A pin left by a previous load. Removing it
+                            // does not disturb anyone still attached to
+                            // that program — an attachment holds its own
+                            // fd — but it does ensure the name resolves to
+                            // the program just loaded against the current
+                            // (reused) maps, rather than to an orphan.
+                            std::fs::remove_file(&pin_path).map_err(|e| {
+                                Error::LaunchFailed(format!(
+                                    "remove stale program pin {}: {e}",
+                                    pin_path.display()
+                                ))
+                            })?;
+                        }
+                        prog.pin(&pin_path).map_err(|e| {
+                            Error::LaunchFailed(format!(
+                                "pin program {}: {e}",
+                                pin_path.display()
+                            ))
+                        })?;
                         cgroup_progs.push((*name, prog_name));
                     }
                     _ => {
@@ -76,20 +151,6 @@ impl BpfLoader {
                         lsm_links.push(link);
                     }
                 }
-            }
-
-            for mut map in obj.maps_mut() {
-                let pin_path = PathBuf::from(PIN_DIR).join(map.name());
-                if pin_path.exists() {
-                    // Already pinned from a previous load (e.g. a prior
-                    // process that crashed before cleanup) — leave the
-                    // existing pin alone rather than fail the whole load;
-                    // re-pinning over a live map would fail anyway.
-                    continue;
-                }
-                map.pin(&pin_path).map_err(|e| {
-                    Error::LaunchFailed(format!("pin map {}: {e}", pin_path.display()))
-                })?;
             }
 
             objects.push(obj);
@@ -140,6 +201,30 @@ impl LoadedPrograms {
     pub fn pending_cgroup_programs(&self) -> &[(&'static str, String)] {
         &self.cgroup_progs
     }
+
+    /// Kernel map ids for the map called `name`, one per loaded object that
+    /// declares it.
+    ///
+    /// Every entry must be identical. A differing id means that object got
+    /// a private copy of the map rather than reusing the shared pin, and a
+    /// program reading a private (and therefore permanently empty)
+    /// `sandboxes` map treats every sandbox as a host process and enforces
+    /// nothing — see the reuse note in `load_and_attach`. Exposed so that
+    /// property can be asserted against a live kernel instead of assumed.
+    pub fn map_ids(&self, name: &str) -> Result<Vec<u32>, Error> {
+        let mut ids = Vec::new();
+        for obj in &self._objects {
+            for map in obj.maps() {
+                if map.name().to_string_lossy() == name {
+                    let info = map
+                        .info()
+                        .map_err(|e| Error::LaunchFailed(format!("map info for {name}: {e}")))?;
+                    ids.push(info.info.id);
+                }
+            }
+        }
+        Ok(ids)
+    }
 }
 
 /// RAII handle for a cgroup_sock_addr program attached to one sandbox's
@@ -147,25 +232,52 @@ impl LoadedPrograms {
 /// high-level `Program::attach_cgroup` needs a live `ProgramMut` from an
 /// still-open `Object`, not just a pinned-path fd, so the raw libbpf-sys
 /// calls are used directly here instead). Detaches automatically on drop —
-/// TODO(phase3): call sites in `aivisor-runtime::SandboxManager` at
-/// sandbox creation (attach) and destroy (drop this handle) are not wired
-/// up yet; this type is the primitive that wiring would use.
+/// Attached for as long as this value lives; detaches on drop.
+///
+/// The cgroup fd is duplicated rather than borrowed. The caller's fd
+/// belongs to the `Cgroup` object, which is dropped during teardown — if
+/// this held the raw number, `Drop` would call `bpf_prog_detach2` on a
+/// closed (and possibly recycled) descriptor, detaching whatever now
+/// happens to live at that number.
 pub struct CgroupProgAttachment {
     _prog_fd: std::os::unix::io::OwnedFd,
-    cgroup_fd: RawFd,
+    cgroup_fd: std::os::unix::io::OwnedFd,
     attach_type: libbpf_sys::bpf_attach_type,
 }
 
 impl Drop for CgroupProgAttachment {
     fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
         unsafe {
             libbpf_sys::bpf_prog_detach2(
-                std::os::unix::io::AsRawFd::as_raw_fd(&self._prog_fd),
-                self.cgroup_fd,
+                self._prog_fd.as_raw_fd(),
+                self.cgroup_fd.as_raw_fd(),
                 self.attach_type,
             );
         }
     }
+}
+
+/// Names of the per-sandbox cgroup programs, paired with the attach type
+/// each one expects. Kept next to the attach helper so a rename on the C
+/// side surfaces as a load-time "open pinned program" error rather than a
+/// sandbox that quietly never gets its egress hooks.
+pub const CGROUP_HOOKS: &[(&str, libbpf_sys::bpf_attach_type)] = &[
+    ("aivisor_cgroup_connect4", CGROUP_INET4_CONNECT),
+    ("aivisor_cgroup_connect6", CGROUP_INET6_CONNECT),
+];
+
+/// Attach every per-sandbox cgroup hook to one sandbox's cgroup.
+///
+/// All-or-nothing: if the second attach fails the first is dropped (and so
+/// detached) before returning, because a sandbox with connect4 hooked but
+/// not connect6 has an open IPv6 egress path.
+pub fn attach_cgroup_hooks(cgroup_fd: RawFd) -> Result<Vec<CgroupProgAttachment>, Error> {
+    let mut attachments = Vec::new();
+    for (name, attach_type) in CGROUP_HOOKS {
+        attachments.push(attach_cgroup_program(name, cgroup_fd, *attach_type)?);
+    }
+    Ok(attachments)
 }
 
 pub const CGROUP_INET4_CONNECT: libbpf_sys::bpf_attach_type = libbpf_sys::BPF_CGROUP_INET4_CONNECT;
@@ -187,8 +299,22 @@ pub fn attach_cgroup_program(
         Error::LaunchFailed(format!("open pinned program {}: {e}", pin_path.display()))
     })?;
 
-    let ret =
-        unsafe { libbpf_sys::bpf_prog_attach(prog_fd.as_raw_fd(), cgroup_fd, attach_type, 0) };
+    // Own a copy of the cgroup fd for the lifetime of the attachment; see
+    // CgroupProgAttachment.
+    let dup = nix::fcntl::fcntl(cgroup_fd, nix::fcntl::FcntlArg::F_DUPFD_CLOEXEC(0))
+        .map_err(|e| Error::LaunchFailed(format!("dup cgroup fd for {program_name}: {e}")))?;
+    // SAFETY: fcntl(F_DUPFD_CLOEXEC) just returned this descriptor and no
+    // other owner exists for it.
+    let owned_cgroup_fd = unsafe { std::os::unix::io::OwnedFd::from_raw_fd(dup) };
+
+    let ret = unsafe {
+        libbpf_sys::bpf_prog_attach(
+            prog_fd.as_raw_fd(),
+            owned_cgroup_fd.as_raw_fd(),
+            attach_type,
+            0,
+        )
+    };
     if ret != 0 {
         return Err(Error::LaunchFailed(format!(
             "bpf_prog_attach {program_name}: {}",
@@ -198,7 +324,7 @@ pub fn attach_cgroup_program(
 
     Ok(CgroupProgAttachment {
         _prog_fd: prog_fd,
-        cgroup_fd,
+        cgroup_fd: owned_cgroup_fd,
         attach_type,
     })
 }

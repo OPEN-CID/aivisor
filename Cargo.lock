@@ -19,7 +19,9 @@ dependencies = [
  "aivisor-policy",
  "libbpf-rs",
  "libbpf-sys",
+ "nix 0.29.0",
  "serde",
+ "sha2",
  "thiserror",
  "tracing",
 ]
@@ -97,6 +99,7 @@ dependencies = [
 name = "aivisor-runtime"
 version = "0.1.0"
 dependencies = [
+ "aivisor-bpf",
  "aivisor-core",
  "aivisor-policy",
  "anyhow",

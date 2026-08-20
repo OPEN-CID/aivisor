@@ -1,4 +1,5 @@
 pub mod abi;
+pub mod bpf;
 pub mod caps;
 pub mod cgroup;
 pub mod landlock;

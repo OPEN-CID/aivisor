@@ -1,9 +1,10 @@
 /* AIVisor task lifecycle BPF LSM programs.
  *
- * Hooks: lsm/task_alloc — called when a new task is created.
- *        lsm/task_free  — called when a task exits.
+ * Hook: lsm/task_alloc — called when a new task is created.
  *
- * Used for PID accounting and propagating sandbox context.
+ * Used to mark a turn dirty when the sandbox forks. There is deliberately
+ * no task_free counterpart: the exit side is observed from userspace via
+ * the cgroup's populated notifier, which is what teardown already waits on.
  */
 
 #include "vmlinux.h"
