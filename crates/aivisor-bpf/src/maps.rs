@@ -565,6 +565,65 @@ impl BpfManager {
         Ok(self.read_ctx(*cgid)?.flags & SandboxCtx::FLAG_DIRTY != 0)
     }
 
+    /// Open a new turn: stamp `turn_id` into the context and clear the
+    /// kernel-set dirty flag, so what [`Self::end_turn`] reports is what
+    /// happened during *this* turn and not an earlier one.
+    ///
+    /// **The caller must guarantee the sandbox is quiescent** — no payload
+    /// running in its cgroup — exactly as for [`Self::begin_setup`].
+    /// `SandboxManager` enforces this by refusing to begin a turn on a
+    /// sandbox in the `Running` state.
+    ///
+    /// The reason is a read-modify-write window that cannot be closed from
+    /// this side. The kernel sets `FLAG_DIRTY` in place, through the map
+    /// value pointer (`common.h`); userspace can only swap the whole
+    /// `sandbox_ctx` value. If a hook set the bit between the `read_ctx`
+    /// below and the `update` that follows, the clear would erase it and a
+    /// dirty turn would be reported clean — a checkpoint silently skipped,
+    /// which is the fail-open direction and the one that loses data.
+    ///
+    /// With no task in the cgroup there is no hook to run, so the window is
+    /// empty rather than merely narrow. The opposite race — a set landing
+    /// just *after* the clear — is harmless: it marks the new turn dirty,
+    /// costing one unnecessary snapshot.
+    pub fn begin_turn(&self, cgid: CgroupId, turn_id: u64) -> Result<(), Error> {
+        let mut ctx = self.read_ctx(cgid)?;
+        ctx.flags &= !SandboxCtx::FLAG_DIRTY;
+        ctx.turn_id = turn_id;
+        self.maps
+            .sandboxes
+            .update(&cgid.as_raw().to_ne_bytes(), &ctx.to_bytes(), MapFlags::ANY)
+            .map_err(|e| {
+                Error::LaunchFailed(format!(
+                    "begin turn {turn_id} for cgroup {}: {e}",
+                    cgid.as_raw()
+                ))
+            })
+    }
+
+    /// Close the current turn and report what the kernel observed.
+    ///
+    /// Deliberately does **not** clear the flag: [`Self::begin_turn`] owns
+    /// that, so a caller that reads the outcome twice gets the same answer
+    /// and a caller that forgets to open the next turn sees a stale-dirty
+    /// (fail-closed) result rather than a spuriously clean one.
+    pub fn end_turn(&self, cgid: CgroupId) -> Result<TurnOutcome, Error> {
+        let ctx = self.read_ctx(cgid)?;
+        Ok(TurnOutcome {
+            turn_id: ctx.turn_id,
+            dirty: ctx.flags & SandboxCtx::FLAG_DIRTY != 0,
+        })
+    }
+
+    /// The policy generation currently installed for a sandbox.
+    ///
+    /// Every [`Self::update_policy`] bumps this, which is what makes a
+    /// runtime `GrantCapability`/`RevokeCapability` observable: the caller
+    /// can prove the swap reached the kernel rather than assuming it did.
+    pub fn policy_generation(&self, cgid: CgroupId) -> Result<u32, Error> {
+        Ok(self.read_ctx(cgid)?.policy_gen)
+    }
+
     /// Best-effort removal of an index range from a rule map.
     ///
     /// Delete failures are swallowed deliberately: this only runs on paths
@@ -577,6 +636,27 @@ impl BpfManager {
             let _ = map.delete(&idx.to_ne_bytes());
         }
     }
+}
+
+/// What the kernel observed during one turn.
+///
+/// `dirty` is set by the BPF programs on any state-changing operation —
+/// write-ish path hooks (`path_mkdir`, `path_unlink`, `path_rename`,
+/// `path_truncate`), `bprm_check_security`, and `task_alloc` for a fork —
+/// see `fs.bpf.c`, `exec.bpf.c` and `task.bpf.c`.
+///
+/// Honest limitation: this is a *conservative* signal, not a precise one. A
+/// turn that opens a file `O_WRONLY` and writes to it without creating,
+/// renaming, truncating or unlinking anything is not flagged, because there
+/// is no LSM hook on `write(2)` and adding one would put a hook on the
+/// hottest path in the kernel. What it reliably catches is the shape of
+/// change that matters for an overlay snapshot — new, removed, renamed or
+/// resized files — plus every exec and every fork. Callers that need
+/// certainty must compare the overlay upper layer, not this flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnOutcome {
+    pub turn_id: u64,
+    pub dirty: bool,
 }
 
 /// Where the `(dev, inode)` pairs behind a policy's exec allowlist come

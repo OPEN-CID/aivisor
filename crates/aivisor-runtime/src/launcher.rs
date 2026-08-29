@@ -573,7 +573,14 @@ fn send_msg(sock: &mut UnixStream, msg: &ChildMsg) -> std::io::Result<()> {
 fn read_mount_devices() -> Result<Vec<(String, u64)>, String> {
     let raw = std::fs::read_to_string("/proc/self/mountinfo")
         .map_err(|e| format!("read /proc/self/mountinfo: {e}"))?;
+    Ok(parse_mount_devices(&raw))
+}
 
+/// Pure parse half of [`read_mount_devices`], split out so the same table
+/// can be built from another task's `/proc/<pid>/mountinfo` (see
+/// [`resolve_exec_identities_via_pid`]) and so the field handling is
+/// testable without a mount namespace.
+fn parse_mount_devices(raw: &str) -> Vec<(String, u64)> {
     let mut mounts = Vec::new();
     for line in raw.lines() {
         let mut fields = line.split_whitespace();
@@ -601,7 +608,87 @@ fn read_mount_devices() -> Result<Vec<(String, u64)>, String> {
     // Longest mount point first, so the lookup below finds the most
     // specific mount covering a path (e.g. /tmp before /).
     mounts.sort_by_key(|(point, _)| std::cmp::Reverse(point.len()));
-    Ok(mounts)
+    mounts
+}
+
+/// Resolve executables to [`ExecIdentity`] from **outside** the sandbox, by
+/// borrowing the view of a task that is already inside it.
+///
+/// This is the runtime-grant counterpart to [`collect_exec_identities`]:
+/// that one runs in the child at launch, this one runs in the daemon
+/// against a sandbox that is already up, which is the only way a
+/// `GrantCapability` call can produce an exec rule the hook will match.
+///
+/// Both halves of the identity have to come from the sandbox's namespace,
+/// and they come from different places (see [`ExecIdentity`] for the
+/// measured table of why):
+///
+/// * **inode** — `stat` through `/proc/<pid>/root/<path>`, which resolves
+///   inside that task's mount namespace and root. `xino=off` on the overlay
+///   means the number passes through unchanged.
+/// * **dev** — the sandbox's own `/proc/<pid>/mountinfo`, never `st_dev`.
+///   `stat(2)` on an overlay reports a synthesised per-layer pseudo device,
+///   not the superblock `s_dev` the exec hook compares against.
+///
+/// `pid` must be a live task inside the target sandbox. A pid that has
+/// exited yields a plain "no such file" error from `/proc` rather than a
+/// wrong answer, because `/proc/<pid>` disappears with the task — this
+/// cannot silently resolve against the host's own root.
+pub(crate) fn resolve_exec_identities_via_pid(
+    pid: u32,
+    paths: &[String],
+    prefixes: &[String],
+) -> Result<Vec<ExecIdentity>, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    if paths.is_empty() && prefixes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mountinfo = format!("/proc/{pid}/mountinfo");
+    let raw = std::fs::read_to_string(&mountinfo)
+        .map_err(|e| format!("read {mountinfo}: {e} — is the sandbox still running?"))?;
+    let mounts = parse_mount_devices(&raw);
+
+    // Paths are joined onto /proc/<pid>/root, which is a magic symlink the
+    // kernel resolves in the target's namespace. `path` is absolute and
+    // sandbox-relative, so the leading slash is stripped before joining
+    // rather than replacing the whole prefix.
+    let in_sandbox = |path: &str| format!("/proc/{pid}/root{path}");
+
+    let mut out = Vec::new();
+    for path in paths {
+        let host_view = in_sandbox(path);
+        let meta = std::fs::metadata(&host_view)
+            .map_err(|e| format!("stat {path:?} inside sandbox (via {host_view}): {e}"))?;
+        out.push(ExecIdentity {
+            // device_for_path matches against the *sandbox's* mount points,
+            // so it takes the sandbox-relative path, not the /proc view.
+            dev: device_for_path(&mounts, path)?,
+            inode: meta.ino(),
+        });
+    }
+
+    for prefix in prefixes {
+        let dev = device_for_path(&mounts, prefix)?;
+        let host_view = in_sandbox(prefix);
+        let entries = std::fs::read_dir(&host_view)
+            .map_err(|e| format!("read exec prefix {prefix:?} inside sandbox: {e}"))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("read exec prefix {prefix:?}: {e}"))?;
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_file() && meta.mode() & 0o111 != 0 {
+                out.push(ExecIdentity {
+                    dev,
+                    inode: meta.ino(),
+                });
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 /// Kernel `dev_t` of the mount that `path` resolves on.
