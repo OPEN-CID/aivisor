@@ -1,10 +1,13 @@
 use std::collections::HashMap;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Mutex, MutexGuard};
 
 use aivisor_bpf::{attach_cgroup_hooks, BpfManager, CgroupProgAttachment, ExecSource};
-use aivisor_core::{CgroupId, Error, ExecIdentity, SandboxId, SandboxSpec, SandboxState};
+use aivisor_core::{
+    Capability, CgroupId, Error, ExecIdentity, SandboxId, SandboxSpec, SandboxState,
+};
 use aivisor_policy::{
     AccessDefault, ExecRule as PolicyExecRule, FsPolicy, FsRule, NetPolicy, Policy,
 };
@@ -30,6 +33,59 @@ pub struct SandboxHandle {
     /// cgroup/connect4|6 programs attached to this sandbox's cgroup.
     /// Detached when dropped, during `destroy`.
     bpf_attachments: Vec<CgroupProgAttachment>,
+    /// The policy as of the last launch. This is the **Landlock ceiling**:
+    /// `apply_landlock` ran once, in the child, from exactly these rules,
+    /// and `restrict_self()` cannot be undone — so no runtime grant may
+    /// exceed what this permits. Kept separate from `effective_policy`
+    /// precisely so a sequence of grants can never erode the record of
+    /// what L3 was actually restricted to.
+    launched_policy: Option<Policy>,
+    /// The Landlock plan actually installed at launch — not
+    /// `launched_policy.compile_landlock()`, because `build_launch_policy`
+    /// adds a dynamic rule for the command being run when a policy has no
+    /// exec section. Recompiling would miss that rule and refuse grants
+    /// L3 in fact permits.
+    launched_landlock: Option<aivisor_policy::LandlockPlan>,
+    /// `launched_policy` plus every grant, minus every revoke. This is what
+    /// L5 currently enforces, and what the next `update_policy` installs.
+    effective_policy: Option<Policy>,
+    /// Exec identities the child reported at launch. A runtime policy
+    /// re-install has to supply the full `(dev, inode)` set again, and
+    /// these cannot be recomputed from the host — see
+    /// [`aivisor_core::ExecIdentity`].
+    installed_exec_ids: Vec<ExecIdentity>,
+    /// The turn currently open, if any.
+    turn: Option<TurnState>,
+}
+
+/// Bookkeeping for one open turn.
+///
+/// The dirty bit itself lives in the kernel (`sandbox_ctx.flags`), not here;
+/// what userspace has to remember is the process count at the start of the
+/// turn, because `task_alloc` marks a fork dirty but nothing marks a task
+/// *exit*, so a turn that forked and reaped back to its starting count is
+/// still a turn that ran something.
+struct TurnState {
+    id: u64,
+    label: String,
+    baseline_pids: u64,
+}
+
+/// What one turn did, as far as the kernel could tell.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TurnReport {
+    pub turn_id: u64,
+    pub label: String,
+    /// Whether a checkpoint is needed. Conservative: false only when both
+    /// signals below say nothing happened.
+    pub dirty: bool,
+    /// The kernel set `FLAG_DIRTY` — a write-shaped path operation, an
+    /// exec, or a fork happened. See [`aivisor_bpf::TurnOutcome`] for what
+    /// this does and does not catch.
+    pub kernel_dirty: bool,
+    /// `pids.current` differs from the turn's baseline. Catches a turn that
+    /// left processes behind even if `FLAG_DIRTY` were somehow missed.
+    pub pid_delta: i64,
 }
 
 #[derive(serde::Serialize)]
@@ -58,6 +114,39 @@ pub struct SandboxManager {
     /// `new()`, so a host without working BPF LSM fails at construction
     /// rather than silently launching sandboxes with layer 5 missing.
     bpf: Arc<BpfManager>,
+    /// Source of turn ids. Starts at 1 so that the `turn_id: 0` every
+    /// sandbox context is registered with unambiguously means "no turn has
+    /// ever been opened" rather than "turn zero".
+    next_turn_id: AtomicU64,
+}
+
+/// Direction of a runtime policy change. The two share almost all of their
+/// machinery but differ in one security-relevant way — a grant is bounded
+/// by the Landlock ceiling and a revoke is not — so the direction is an
+/// explicit parameter rather than a bool nobody can read at the call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapabilityChange {
+    Grant,
+    Revoke,
+}
+
+impl CapabilityChange {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Grant => "grant",
+            Self::Revoke => "revoke",
+        }
+    }
+}
+
+/// The pid of some live task in a cgroup, for borrowing a namespace view
+/// from. Any task in the sandbox will do: they all share its mount
+/// namespace, which is the only thing the caller needs.
+fn first_pid_in_cgroup(cgroup_path: &std::path::Path) -> Option<u32> {
+    std::fs::read_to_string(cgroup_path.join("cgroup.procs"))
+        .ok()?
+        .lines()
+        .find_map(|line| line.trim().parse::<u32>().ok())
 }
 
 impl SandboxManager {
@@ -98,6 +187,7 @@ impl SandboxManager {
             launcher,
             landlock_abi,
             bpf,
+            next_turn_id: AtomicU64::new(1),
         })
     }
 
@@ -224,6 +314,11 @@ impl SandboxManager {
                 supervisor: None,
                 rootfs: Some(rootfs),
                 bpf_attachments,
+                launched_policy: None,
+                launched_landlock: None,
+                effective_policy: None,
+                installed_exec_ids: Vec::new(),
+                turn: None,
             },
         );
 
@@ -300,6 +395,11 @@ impl SandboxManager {
         };
 
         let launch_policy = self.build_launch_policy(&resolved_policy, cmd)?;
+        // Snapshot of the ruleset the child is about to lock itself into.
+        // This is the ceiling every later capability grant is checked
+        // against, and it must be the plan as built — including the dynamic
+        // per-command rule `build_launch_policy` may have appended.
+        let installed_landlock = launch_policy.landlock.clone();
         let bpf_plan = resolved_policy.compile_bpf();
 
         // The incoming child builds its own mount namespace from inside
@@ -315,9 +415,22 @@ impl SandboxManager {
         // Installed at the launcher's handshake, from identities the child
         // observed inside its own mount namespace — see ExecIdentity for
         // why they cannot be derived here.
+        // Captured so a later `grant_capability` can re-install the policy
+        // with the same identity set. They are only obtainable from inside
+        // the child's mount namespace (see `ExecIdentity`), so if they are
+        // not kept here they cannot be recovered afterwards.
+        let reported_exec_ids: Mutex<Vec<ExecIdentity>> = Mutex::new(Vec::new());
+
         let install_policy = |exec_ids: &[ExecIdentity]| -> Result<(), Error> {
             self.bpf
-                .update_policy(cgid, &bpf_plan, ExecSource::Resolved(exec_ids))
+                .update_policy(cgid, &bpf_plan, ExecSource::Resolved(exec_ids))?;
+            // Only recorded once the install succeeded, so a failed launch
+            // cannot leave the handle claiming a policy the kernel never got.
+            if let Ok(mut slot) = reported_exec_ids.lock() {
+                slot.clear();
+                slot.extend_from_slice(exec_ids);
+            }
+            Ok(())
         };
 
         let cg_fd = cg_fd_owner.as_raw_fd();
@@ -342,6 +455,22 @@ impl SandboxManager {
                 return Err(e);
             }
         };
+
+        // Record what was installed *before* blocking on the payload, so a
+        // control-plane grant issued while the command is still running
+        // finds the launch state it needs rather than an empty handle.
+        {
+            let mut inner = self.lock_inner();
+            if let Some(handle) = inner.registry.get_mut(&id.to_string()) {
+                handle.launched_policy = Some(resolved_policy.clone());
+                handle.launched_landlock = Some(installed_landlock);
+                handle.effective_policy = Some(resolved_policy);
+                handle.installed_exec_ids = reported_exec_ids
+                    .lock()
+                    .map(|ids| ids.clone())
+                    .unwrap_or_default();
+            }
+        }
 
         let exit_code = supervisor.wait();
 
@@ -428,6 +557,298 @@ impl SandboxManager {
             exec_paths,
             exec_prefixes,
         })
+    }
+
+    /// Open a turn: stamp a fresh turn id into the sandbox's BPF context,
+    /// clear the kernel dirty flag, and record the process-count baseline.
+    ///
+    /// Refuses on a `Running` sandbox, and that guard is load-bearing
+    /// rather than tidiness. Clearing `FLAG_DIRTY` is a read-modify-write
+    /// of the whole `sandbox_ctx` from userspace, while the kernel sets the
+    /// bit in place; if a hook fired between the read and the write, the
+    /// clear would erase a dirty mark belonging to the turn just ending and
+    /// a needed checkpoint would be silently skipped. With no task in the
+    /// cgroup there is no hook to fire. See `BpfManager::begin_turn`.
+    ///
+    /// Returns the new turn id.
+    pub fn begin_turn(&self, id: &SandboxId, label: &str) -> Result<u64, Error> {
+        let mut inner = self.lock_inner();
+        let handle = inner
+            .registry
+            .get_mut(&id.to_string())
+            .ok_or_else(|| Error::LaunchFailed(format!("sandbox {id} not found")))?;
+
+        if handle.state == SandboxState::Running {
+            return Err(Error::LaunchFailed(format!(
+                "cannot begin a turn on sandbox {id} while a payload is running — clearing \
+                 the kernel dirty flag races the hooks that set it, and losing that race \
+                 reports a dirty turn as clean"
+            )));
+        }
+
+        let cgroup = handle
+            .cgroup
+            .as_ref()
+            .ok_or_else(|| Error::LaunchFailed(format!("sandbox {id} has no cgroup")))?;
+        let cgid = cgroup.id;
+        let baseline_pids = cgroup.stats()?.pids_current.unwrap_or(0);
+
+        let turn_id = self.next_turn_id.fetch_add(1, AtomicOrdering::Relaxed);
+        self.bpf.begin_turn(cgid, turn_id)?;
+
+        handle.turn = Some(TurnState {
+            id: turn_id,
+            label: label.to_string(),
+            baseline_pids,
+        });
+        Ok(turn_id)
+    }
+
+    /// Close the open turn and report whether anything changed.
+    ///
+    /// Fail-closed in every uncertain case: an unreadable `pids.current`,
+    /// or a kernel context that cannot be read at all, resolves to dirty.
+    /// The cost of a wrong "dirty" is one unnecessary snapshot; the cost of
+    /// a wrong "clean" is a lost turn of the agent's work.
+    pub fn end_turn(&self, id: &SandboxId) -> Result<TurnReport, Error> {
+        let mut inner = self.lock_inner();
+        let handle = inner
+            .registry
+            .get_mut(&id.to_string())
+            .ok_or_else(|| Error::LaunchFailed(format!("sandbox {id} not found")))?;
+
+        let turn = handle.turn.take().ok_or_else(|| {
+            Error::LaunchFailed(format!(
+                "sandbox {id} has no open turn — begin_turn must run first"
+            ))
+        })?;
+
+        let cgroup = handle
+            .cgroup
+            .as_ref()
+            .ok_or_else(|| Error::LaunchFailed(format!("sandbox {id} has no cgroup")))?;
+
+        let outcome = self.bpf.end_turn(cgroup.id)?;
+
+        // `None` means the controller file could not be read. Treating that
+        // as "no change" would be a fail-open guess about a turn nobody
+        // observed, so it counts as a delta instead.
+        let (pid_delta, pids_unreadable) = match cgroup.stats()?.pids_current {
+            Some(now) => (now as i64 - turn.baseline_pids as i64, false),
+            None => (0, true),
+        };
+
+        Ok(TurnReport {
+            turn_id: turn.id,
+            label: turn.label,
+            dirty: outcome.dirty || pid_delta != 0 || pids_unreadable,
+            kernel_dirty: outcome.dirty,
+            pid_delta,
+        })
+    }
+
+    /// Widen a running sandbox's policy by one capability (blueprint §8.4's
+    /// audited exception to invariant M), installing the result as a new
+    /// generation of the L5 policy.
+    ///
+    /// **What a grant can and cannot reach.** Runtime policy changes move
+    /// layer 5 only. Every layer must permit an operation for it to
+    /// succeed, so:
+    ///
+    /// * **Network** grants work in full. Landlock is built here with
+    ///   `handled_access_net: 0` (egress is L5's job, not duplicated in
+    ///   L3), so nothing above L5 is holding the connection back.
+    /// * **Exec** grants work up to the Landlock `EXECUTE` ceiling fixed at
+    ///   launch. A binary outside that ceiling is refused rather than
+    ///   installed, because `restrict_self()` is irreversible — installing
+    ///   the L5 rule would report a widening the sandbox will never see,
+    ///   since L3 still denies the execve.
+    /// * **Filesystem** capabilities are refused outright; see
+    ///   `Policy::check_runtime_capability` for why neither direction can
+    ///   be made to mean what its name says.
+    ///
+    /// The swap itself is atomic and generation-counted — `update_policy`
+    /// writes the new rules into indices the live context does not point at
+    /// yet, then swaps the context in one map update. Returns the new
+    /// policy generation, so a caller can prove the change reached the
+    /// kernel instead of assuming it did.
+    pub fn grant_capability(&self, id: &SandboxId, cap: &Capability) -> Result<u32, Error> {
+        self.apply_capability(id, cap, CapabilityChange::Grant)
+    }
+
+    /// Narrow a running sandbox's policy by one capability.
+    ///
+    /// Sound in a way granting is not: both the exec and network L5 hooks
+    /// deny on no match, so removing a rule is by itself sufficient to
+    /// deny — no cooperation from any other layer is required. (Filesystem
+    /// is still refused: `lsm/file_open` allows what it has no rule for, so
+    /// removing an entry there would *widen* access. See
+    /// `Policy::check_runtime_capability`.)
+    pub fn revoke_capability(&self, id: &SandboxId, cap: &Capability) -> Result<u32, Error> {
+        self.apply_capability(id, cap, CapabilityChange::Revoke)
+    }
+
+    fn apply_capability(
+        &self,
+        id: &SandboxId,
+        cap: &Capability,
+        change: CapabilityChange,
+    ) -> Result<u32, Error> {
+        // Refuse unsupported capability kinds before anything else, so the
+        // caller gets the architectural reason rather than a downstream
+        // symptom of it.
+        Policy::check_runtime_capability(cap)?;
+
+        let mut inner = self.lock_inner();
+        let handle = inner
+            .registry
+            .get_mut(&id.to_string())
+            .ok_or_else(|| Error::LaunchFailed(format!("sandbox {id} not found")))?;
+
+        let cgroup = handle
+            .cgroup
+            .as_ref()
+            .ok_or_else(|| Error::LaunchFailed(format!("sandbox {id} has no cgroup")))?;
+        let cgid = cgroup.id;
+        let cgroup_path = cgroup.path.clone();
+
+        let effective = handle.effective_policy.clone().ok_or_else(|| {
+            Error::PolicyInvalid(format!(
+                "sandbox {id} has never been launched, so it has no live L5 policy to change. \
+                 Capabilities are granted against a running confinement; set the policy on the \
+                 spec instead"
+            ))
+        })?;
+
+        if change == CapabilityChange::Grant {
+            self.check_landlock_ceiling(id, handle, cap)?;
+        }
+
+        let next_policy = match change {
+            CapabilityChange::Grant => effective.with_capability_granted(cap)?,
+            CapabilityChange::Revoke => effective.with_capability_revoked(cap)?,
+        };
+
+        let exec_ids = self.exec_ids_after(handle, &cgroup_path, cap, change)?;
+
+        // Installs the new rules, then swaps the context to point at them —
+        // the sandbox observes the old generation or the new one, never a
+        // mix. On failure nothing below runs, so the handle keeps
+        // describing the policy the kernel still holds.
+        self.bpf.update_policy(
+            cgid,
+            &next_policy.compile_bpf(),
+            ExecSource::Resolved(&exec_ids),
+        )?;
+
+        handle.effective_policy = Some(next_policy);
+        handle.installed_exec_ids = exec_ids;
+
+        let generation = self.bpf.policy_generation(cgid)?;
+
+        // blueprint §8.4: the GrantCapability exception to monotonic
+        // narrowing is only acceptable because it is audited. This is that
+        // audit record.
+        tracing::info!(
+            sandbox = %id,
+            cgroup_id = cgid.as_raw(),
+            capability = %cap,
+            kind = cap.kind(),
+            change = change.as_str(),
+            policy_generation = generation,
+            "runtime capability change installed"
+        );
+
+        Ok(generation)
+    }
+
+    /// Refuse a grant that Landlock will still deny.
+    ///
+    /// Only exec is checked: network is not gated by Landlock in this build
+    /// (`handled_access_net: 0`), and filesystem never reaches here.
+    fn check_landlock_ceiling(
+        &self,
+        id: &SandboxId,
+        handle: &SandboxHandle,
+        cap: &Capability,
+    ) -> Result<(), Error> {
+        let Capability::Exec { path } = cap else {
+            return Ok(());
+        };
+
+        let ceiling = handle.launched_landlock.as_ref().ok_or_else(|| {
+            Error::PolicyInvalid(format!(
+                "sandbox {id} has no recorded Landlock ruleset, so an exec grant cannot be \
+                 bounded by it — refusing rather than installing an L5 rule that L3 may deny"
+            ))
+        })?;
+
+        // Both bits: the kernel has to read the file to execute it, so
+        // EXECUTE without READ_FILE is not a runnable grant.
+        let required = (aivisor_policy::landlock_bits::EXECUTE
+            | aivisor_policy::landlock_bits::READ_FILE)
+            & aivisor_policy::landlock_bits::known_at_abi(self.landlock_abi);
+
+        if !ceiling.permits(std::path::Path::new(path), required) {
+            return Err(Error::Unsupported(format!(
+                "cannot grant exec on {path:?} to sandbox {id}: the Landlock ruleset installed \
+                 at launch does not permit EXECUTE there, and a Landlock ruleset cannot be \
+                 widened afterwards — restrict_self() is irreversible. Installing the L5 rule \
+                 would report a grant the sandbox will never observe, because L3 still denies \
+                 the execve. Add the path to the sandbox's policy and relaunch"
+            )));
+        }
+        Ok(())
+    }
+
+    /// The exec identity set to install alongside a capability change.
+    ///
+    /// Identities cannot be recomputed from the host — `(dev, inode)` as
+    /// the exec hook sees them only exist inside the sandbox's mount
+    /// namespace (see [`aivisor_core::ExecIdentity`]) — so the launch-time
+    /// set is carried forward and adjusted, never rebuilt from scratch.
+    /// Rebuilding would silently drop the dynamic per-command identity that
+    /// `build_launch_policy` installs when a policy has no exec section.
+    fn exec_ids_after(
+        &self,
+        handle: &SandboxHandle,
+        cgroup_path: &std::path::Path,
+        cap: &Capability,
+        change: CapabilityChange,
+    ) -> Result<Vec<ExecIdentity>, Error> {
+        let Capability::Exec { path } = cap else {
+            // Network changes touch no exec rule.
+            return Ok(handle.installed_exec_ids.clone());
+        };
+
+        // Resolving needs a task inside the sandbox to borrow a namespace
+        // view from. Without one there is nothing to resolve against, and
+        // guessing from the host would produce the wrong device number and
+        // therefore a rule that matches nothing.
+        let pid = first_pid_in_cgroup(cgroup_path).ok_or_else(|| {
+            Error::LaunchFailed(format!(
+                "no live process in the sandbox's cgroup, so {path:?} cannot be resolved to the \
+                 (dev, inode) pair the exec hook matches — those exist only inside the \
+                 sandbox's mount namespace"
+            ))
+        })?;
+
+        let resolved =
+            crate::launcher::resolve_exec_identities_via_pid(pid, std::slice::from_ref(path), &[])
+                .map_err(Error::LaunchFailed)?;
+
+        let mut ids = handle.installed_exec_ids.clone();
+        match change {
+            CapabilityChange::Grant => {
+                for id in resolved {
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+            }
+            CapabilityChange::Revoke => ids.retain(|id| !resolved.contains(id)),
+        }
+        Ok(ids)
     }
 
     pub fn pause(&self, id: &SandboxId) -> Result<(), Error> {

@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use aivisor_core::{Capability, Error};
+
 #[derive(Debug, Clone)]
 pub struct Policy {
     pub api_version: String,
@@ -77,13 +79,16 @@ pub struct AuditOpts {
     pub sink: Option<String>,
 }
 
-#[derive(Debug)]
+/// `Clone` because the plan is also the record of what Landlock was
+/// restricted to at launch: `SandboxManager` keeps a copy per sandbox to
+/// bound later capability grants (see [`LandlockPlan::permits`]).
+#[derive(Debug, Clone)]
 pub struct LandlockPlan {
     pub rules: Vec<LandlockRule>,
     pub abi: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LandlockRule {
     pub path: PathBuf,
     pub access_mask: u64,
@@ -287,7 +292,10 @@ impl Policy {
         SeccompPlan { profile }
     }
 
-    fn access_to_landlock_mask(access: &[String]) -> u64 {
+    /// Public because a runtime capability grant has to ask "does the
+    /// Landlock ruleset installed at launch already permit this?" before it
+    /// installs anything — see `LandlockPlan::permits`.
+    pub fn access_to_landlock_mask(access: &[String]) -> u64 {
         use landlock_bits::*;
         let mut mask = 0u64;
         for a in access {
@@ -302,6 +310,187 @@ impl Policy {
             }
         }
         mask
+    }
+}
+
+impl LandlockPlan {
+    /// Whether the ruleset this plan describes already permits `required`
+    /// on `path`.
+    ///
+    /// Landlock rules are added as `LANDLOCK_RULE_PATH_BENEATH` (see
+    /// `aivisor_runtime::landlock::apply_landlock`), so a rule on a
+    /// directory covers everything under it — hence the ancestor walk
+    /// rather than an exact-path comparison.
+    ///
+    /// This is the ceiling test for a runtime capability grant. A Landlock
+    /// ruleset composes by intersection and `restrict_self()` cannot be
+    /// undone from outside the restricted process, so the set of rights
+    /// L3 permits is fixed for a sandbox's whole life. A grant that L3
+    /// would still deny must be refused rather than installed at L5,
+    /// because installing it reports a widening the sandbox will never
+    /// actually observe.
+    pub fn permits(&self, path: &std::path::Path, required: u64) -> bool {
+        if required == 0 {
+            return true;
+        }
+        self.rules
+            .iter()
+            .any(|rule| path.starts_with(&rule.path) && rule.access_mask & required == required)
+    }
+}
+
+impl Policy {
+    /// A copy of this policy with `cap` added.
+    ///
+    /// Only the capabilities a running sandbox can actually be granted are
+    /// accepted; see [`Policy::check_runtime_capability`] for why
+    /// filesystem capabilities are not among them.
+    pub fn with_capability_granted(&self, cap: &Capability) -> Result<Policy, Error> {
+        Self::check_runtime_capability(cap)?;
+        let mut next = self.clone();
+        match cap {
+            Capability::Network { cidr, ports } => {
+                let net = next.network.get_or_insert_with(|| NetPolicy {
+                    default: AccessDefault::Deny,
+                    egress: Vec::new(),
+                    block_metadata: true,
+                    dns_policy: None,
+                });
+                // Merge into an existing rule for the same CIDR rather than
+                // appending a second one. Two rules for one destination
+                // compile to two writes of the same LPM key, so the second
+                // would overwrite the first's port bitmap and silently undo
+                // an earlier grant.
+                match net
+                    .egress
+                    .iter_mut()
+                    .find(|r| matches!(r, NetRule::Direct { cidr: c, .. } if c == cidr))
+                {
+                    Some(NetRule::Direct {
+                        ports: existing, ..
+                    }) => {
+                        for p in ports {
+                            if !existing.contains(p) {
+                                existing.push(*p);
+                            }
+                        }
+                        existing.sort_unstable();
+                    }
+                    _ => net.egress.push(NetRule::Direct {
+                        cidr: cidr.clone(),
+                        ports: ports.clone(),
+                    }),
+                }
+            }
+            Capability::Exec { path } => {
+                let exec = next.exec.get_or_insert_with(|| ExecPolicy {
+                    default: AccessDefault::Deny,
+                    allow: Vec::new(),
+                });
+                let already = exec
+                    .allow
+                    .iter()
+                    .any(|r| matches!(r, ExecRule::Path { path: p, .. } if p == path));
+                if !already {
+                    exec.allow.push(ExecRule::Path {
+                        path: path.clone(),
+                        // A runtime grant carries no `sha256:` pin. Adding
+                        // one would be an install-time check against a file
+                        // the granting side cannot see (it lives inside the
+                        // sandbox's mount namespace), so claiming to pin it
+                        // would be a claim this code cannot keep.
+                        pin: None,
+                    });
+                }
+            }
+            Capability::Filesystem { .. } => unreachable!("refused by check_runtime_capability"),
+        }
+        Ok(next)
+    }
+
+    /// A copy of this policy with `cap` removed.
+    ///
+    /// Revocation is a narrowing, and narrowing is always sound at L5
+    /// because both the exec and network hooks deny on no match — removing
+    /// a rule is sufficient to deny. (This is *not* symmetric with granting,
+    /// which is bounded by Landlock; see [`LandlockPlan::permits`].)
+    pub fn with_capability_revoked(&self, cap: &Capability) -> Result<Policy, Error> {
+        Self::check_runtime_capability(cap)?;
+        let mut next = self.clone();
+        match cap {
+            Capability::Network { cidr, ports } => {
+                if let Some(net) = next.network.as_mut() {
+                    for rule in net.egress.iter_mut() {
+                        if let NetRule::Direct {
+                            cidr: c,
+                            ports: existing,
+                        } = rule
+                        {
+                            if c == cidr {
+                                existing.retain(|p| !ports.contains(p));
+                            }
+                        }
+                    }
+                    // A Direct rule with no ports left would compile to an
+                    // LPM entry with an all-zero bitmap: present in the map,
+                    // matching nothing. Dropping it keeps the map free of
+                    // entries that exist only to be rejected.
+                    net.egress.retain(
+                        |r| !matches!(r, NetRule::Direct { ports, .. } if ports.is_empty()),
+                    );
+                }
+            }
+            Capability::Exec { path } => {
+                if let Some(exec) = next.exec.as_mut() {
+                    exec.allow
+                        .retain(|r| !matches!(r, ExecRule::Path { path: p, .. } if p == path));
+                }
+            }
+            Capability::Filesystem { .. } => unreachable!("refused by check_runtime_capability"),
+        }
+        Ok(next)
+    }
+
+    /// Which capabilities may be changed on a *running* sandbox at all.
+    ///
+    /// Network and exec can: their L5 hooks (`lsm/socket_connect`,
+    /// `cgroup/connect4|6`, `lsm/bprm_check_security`) deny on no match, so
+    /// adding or removing a map entry changes the answer in both
+    /// directions, and Landlock does not gate either one — the ruleset is
+    /// built with `handled_access_net: 0`, and exec is additionally bounded
+    /// by the EXECUTE ceiling the caller checks with
+    /// [`LandlockPlan::permits`].
+    ///
+    /// Filesystem cannot, and refusing is the honest answer rather than a
+    /// missing feature:
+    ///
+    /// * **Granting** more than Landlock already allows is impossible —
+    ///   `restrict_self()` is irreversible and only the restricted process
+    ///   can narrow itself further, so no daemon-side call can widen L3.
+    ///   Granting *within* what Landlock allows changes nothing, because
+    ///   `lsm/file_open` already allows any path it has no exact rule for
+    ///   (see the scope note at the top of `fs.bpf.c` — L3 is the recursive
+    ///   filesystem layer, L5 is an exact-path override on top of it).
+    /// * **Revoking** would have to make L5 deny a path it currently
+    ///   allows, but `fs_rules` has no deny-rule encoding: removing an
+    ///   entry returns that path to "no exact match", which allows. The
+    ///   operation would therefore widen access under a name that promises
+    ///   the opposite.
+    ///
+    /// Both directions would report success and enforce nothing, which
+    /// CLAUDE.md rule 4 makes a defect rather than a limitation.
+    pub fn check_runtime_capability(cap: &Capability) -> Result<(), Error> {
+        match cap {
+            Capability::Network { .. } | Capability::Exec { .. } => Ok(()),
+            Capability::Filesystem { path, .. } => Err(Error::Unsupported(format!(
+                "filesystem capability {path:?} cannot be granted or revoked on a running \
+                 sandbox. Landlock (L3) is the recursive filesystem layer and its ruleset is \
+                 fixed at launch — restrict_self() is irreversible and only the confined \
+                 process itself can narrow further — while the L5 file_open hook allows any \
+                 path it has no exact rule for, so it cannot express a runtime deny either. \
+                 Change the sandbox's policy and relaunch instead"
+            ))),
+        }
     }
 }
 
@@ -562,5 +751,151 @@ mod tests {
         assert!(parse_sha256_pin(valid).is_some());
         assert!(parse_sha256_pin("sha256:tooshort").is_none());
         assert!(parse_sha256_pin("md5:abcdef").is_none());
+    }
+
+    // ---- runtime capability grants (T3.6) ----
+
+    fn net_cap(cidr: &str, ports: &[u16]) -> Capability {
+        Capability::Network {
+            cidr: cidr.into(),
+            ports: ports.to_vec(),
+        }
+    }
+
+    #[test]
+    fn granting_a_network_capability_reaches_the_bpf_plan() {
+        let policy = test_policy();
+        let granted = policy
+            .with_capability_granted(&net_cap("203.0.113.7/32", &[53]))
+            .unwrap();
+        let plan = granted.compile_bpf();
+        assert_eq!(plan.net_rules.len(), 1);
+        assert_eq!(plan.net_rules[0].cidr, "203.0.113.7/32");
+        assert_eq!(plan.net_rules[0].ports, vec![53]);
+        // The original is untouched — grants produce a new policy so a
+        // failed install can leave the live one in place.
+        assert!(policy.compile_bpf().net_rules.is_empty());
+    }
+
+    #[test]
+    fn a_grant_defaults_to_deny_and_keeps_metadata_blocked() {
+        // Materialising a NetPolicy for a document that had none must not
+        // accidentally open the default or unblock the metadata endpoint.
+        let granted = test_policy()
+            .with_capability_granted(&net_cap("10.0.0.0/8", &[53]))
+            .unwrap();
+        let net = granted.network.as_ref().unwrap();
+        assert_eq!(net.default, AccessDefault::Deny);
+        assert!(net.block_metadata);
+        assert!(granted.compile_bpf().block_metadata);
+    }
+
+    #[test]
+    fn repeated_grants_for_one_cidr_merge_instead_of_shadowing() {
+        // Two Direct rules for the same CIDR compile to two writes of the
+        // same LPM key, so the second would overwrite the first's bitmap
+        // and silently revoke the earlier grant.
+        let policy = test_policy()
+            .with_capability_granted(&net_cap("10.0.0.0/8", &[53]))
+            .unwrap()
+            .with_capability_granted(&net_cap("10.0.0.0/8", &[7]))
+            .unwrap();
+        let plan = policy.compile_bpf();
+        assert_eq!(plan.net_rules.len(), 1);
+        assert_eq!(plan.net_rules[0].ports, vec![7, 53]);
+    }
+
+    #[test]
+    fn revoking_removes_only_the_named_ports() {
+        let policy = test_policy()
+            .with_capability_granted(&net_cap("10.0.0.0/8", &[7, 53]))
+            .unwrap()
+            .with_capability_revoked(&net_cap("10.0.0.0/8", &[53]))
+            .unwrap();
+        let plan = policy.compile_bpf();
+        assert_eq!(plan.net_rules.len(), 1);
+        assert_eq!(plan.net_rules[0].ports, vec![7]);
+    }
+
+    #[test]
+    fn revoking_the_last_port_drops_the_rule_entirely() {
+        // An all-zero port bitmap is an LPM entry that exists only to be
+        // rejected; it should not be left in the map.
+        let policy = test_policy()
+            .with_capability_granted(&net_cap("10.0.0.0/8", &[53]))
+            .unwrap()
+            .with_capability_revoked(&net_cap("10.0.0.0/8", &[53]))
+            .unwrap();
+        assert!(policy.compile_bpf().net_rules.is_empty());
+    }
+
+    #[test]
+    fn granting_an_exec_capability_is_idempotent() {
+        let cap = Capability::Exec {
+            path: "/usr/bin/git".into(),
+        };
+        let policy = test_policy()
+            .with_capability_granted(&cap)
+            .unwrap()
+            .with_capability_granted(&cap)
+            .unwrap();
+        assert_eq!(policy.exec.as_ref().unwrap().allow.len(), 1);
+        assert_eq!(policy.compile_bpf().exec_rules.len(), 1);
+
+        let revoked = policy.with_capability_revoked(&cap).unwrap();
+        assert!(revoked.exec.as_ref().unwrap().allow.is_empty());
+    }
+
+    #[test]
+    fn a_runtime_exec_grant_never_claims_a_hash_pin() {
+        // The granting side cannot see the binary (it lives in the
+        // sandbox's mount namespace), so it must not assert integrity it
+        // did not verify.
+        let policy = test_policy()
+            .with_capability_granted(&Capability::Exec {
+                path: "/usr/bin/git".into(),
+            })
+            .unwrap();
+        assert_eq!(policy.compile_bpf().exec_rules[0].hash, None);
+    }
+
+    #[test]
+    fn filesystem_capabilities_are_refused_in_both_directions() {
+        // Not a missing feature: neither direction can be made to mean what
+        // its name says. See check_runtime_capability.
+        let cap = Capability::Filesystem {
+            path: "/data".into(),
+            access: vec!["read".into()],
+        };
+        let granted = test_policy().with_capability_granted(&cap).unwrap_err();
+        assert!(granted.to_string().contains("cannot be granted or revoked"));
+        assert!(test_policy().with_capability_revoked(&cap).is_err());
+    }
+
+    #[test]
+    fn landlock_ceiling_covers_paths_beneath_a_granted_directory() {
+        let policy = Policy {
+            filesystem: Some(FsPolicy {
+                default: AccessDefault::Deny,
+                rules: vec![FsRule {
+                    path: "/usr".into(),
+                    access: vec!["read".into(), "execute".into()],
+                    recursive: true,
+                }],
+            }),
+            ..test_policy()
+        };
+        let plan = policy.compile_landlock(3);
+        let exec_read = landlock_bits::EXECUTE | landlock_bits::READ_FILE;
+
+        // path_beneath: a rule on /usr covers /usr/bin/git.
+        assert!(plan.permits(std::path::Path::new("/usr/bin/git"), exec_read));
+        // Outside the tree: no rule, so no ceiling.
+        assert!(!plan.permits(std::path::Path::new("/opt/tool"), exec_read));
+        // Inside the tree but asking for a right the rule does not carry.
+        assert!(!plan.permits(
+            std::path::Path::new("/usr/bin/git"),
+            landlock_bits::WRITE_FILE
+        ));
     }
 }
